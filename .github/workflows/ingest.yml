@@ -1,0 +1,21 @@
+name: ingest
+
+on:
+  schedule:
+    # Hourly. The route itself waits until 30 minutes after local sunset,
+    # and the early route no-ops unless SOLYA_EARLY_PULL is enabled.
+    - cron: "20 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Daily pull and evening send
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          test -n "$APP_URL" && test -n "$CRON_SECRET"
+          curl -fsS -H "Authorization: Bearer $CRON_SECRET" "$APP_URL/api/cron/daily"
+          curl -fsS -H "Authorization: Bearer $CRON_SECRET" "$APP_URL/api/cron/early"
