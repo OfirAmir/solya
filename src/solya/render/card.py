@@ -88,6 +88,8 @@ def render_card(data: CardData) -> bytes:
         cx, cy = RAY_CENTER
         r = RAY_DIAMETER // 2
         draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=RAY_COLORS[ray_band(data.ray)])
+        draw.text(RAY_CENTER, str(int(round(data.ray))), font=_font(110, 700), fill="#FFFFFF", anchor="mm")
+        draw.text((cx, cy + r + 28), "RAY FACTOR", font=_font(30, 400), fill=GREY, anchor="mm")
 
     y = top
     for row in data.rows:

@@ -41,7 +41,16 @@ def test_render_png_width():
 
 
 def test_ray_circle_color():
-    assert _near(_open(_data(ray=95)).getpixel((540, 190)), GREEN)
+    assert _near(_open(_data(ray=95)).getpixel((540, 85)), GREEN)
+
+
+def test_ray_score_drawn():
+    im = _open(_data(ray=95))
+    assert any(
+        im.getpixel((x, y)) == (255, 255, 255)
+        for x in range(500, 581)
+        for y in range(150, 231)
+    )
 
 
 def test_no_ray_no_circle():
