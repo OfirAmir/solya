@@ -110,3 +110,26 @@ def test_rate_limiter_window(clock):
     assert rl.hit("b") is True
     clock.advance(timedelta(seconds=61))
     assert rl.hit("a") is True
+
+
+def test_read_admin_not_before(clock):
+    s = Sessions(SECRET, clock, admin_password="pw")
+    cookie = s.issue_admin()
+    assert s.read_admin(cookie, not_before=None) is True
+    assert s.read_admin(cookie, not_before=clock.now() - timedelta(seconds=1)) is True
+    assert s.read_admin(cookie, not_before=clock.now()) is False  # issued at or before
+    clock.advance(timedelta(seconds=5))
+    assert s.read_admin(s.issue_admin(), not_before=clock.now() - timedelta(seconds=1)) is True
+
+
+def test_rate_limiter_blocked_leaves_no_entries(clock):
+    rl = RateLimiter(2, 60, clock)
+    assert rl.blocked("fresh") is False
+    assert "fresh" not in rl._hits
+    rl.hit("a")
+    clock.advance(timedelta(seconds=61))
+    assert rl.blocked("a") is False
+    assert "a" not in rl._hits
+    rl.hit("b")
+    clock.advance(timedelta(seconds=61))
+    assert rl.hit("b") is True and len(rl._hits["b"]) == 1

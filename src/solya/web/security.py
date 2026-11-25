@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+from datetime import datetime
 from collections import defaultdict, deque
 from collections.abc import Callable
 
@@ -62,12 +63,17 @@ class Sessions:
     def issue_admin(self) -> str:
         return self._admin_serializer.dumps({"a": True})
 
-    def read_admin(self, cookie: str | None) -> bool:
+    def read_admin(self, cookie: str | None, not_before: datetime | None = None) -> bool:
+        """Valid admin cookie; with `not_before`, only one signed after that instant."""
         if not cookie:
             return False
         try:
-            data = self._admin_serializer.loads(cookie, max_age=ADMIN_MAX_AGE)
+            data, signed_at = self._admin_serializer.loads(
+                cookie, max_age=ADMIN_MAX_AGE, return_timestamp=True
+            )
         except BadData:
+            return False
+        if not_before is not None and signed_at <= not_before:
             return False
         return isinstance(data, dict) and data.get("a") is True
 
@@ -98,19 +104,25 @@ class RateLimiter:
 
     def blocked(self, key: str) -> bool:
         """True when the key is already at its limit; records nothing."""
-        now = self._now()
-        q = self._hits[key]
-        while q and q[0] <= now - self.window_s:
-            q.popleft()
+        q = self._hits.get(key)
+        if q is None:
+            return False
+        self._prune(key, q)
         return len(q) >= self.limit
 
     def hit(self, key: str) -> bool:
         """Record an attempt; False when the key is over the limit."""
-        now = self._now()
         q = self._hits[key]
-        while q and q[0] <= now - self.window_s:
-            q.popleft()
+        self._prune(key, q)
         if len(q) >= self.limit:
             return False
-        q.append(now)
+        self._hits[key].append(self._now())
         return True
+
+    def _prune(self, key: str, q: deque[float]) -> None:
+        """Drop expired hits, and the key itself once it has none left."""
+        cutoff = self._now() - self.window_s
+        while q and q[0] <= cutoff:
+            q.popleft()
+        if not q:
+            self._hits.pop(key, None)

@@ -16,7 +16,7 @@ from sqlalchemy import func, select
 from solya.db import session_scope
 from solya.models import LlmUsage, Owner, RawResponse, Site
 from solya.web.journey import (
-    FORM_EXPIRED, NOT_FOUND, PRE_COOKIE, PRE_MAX_AGE, _container, _message, templates,
+    FORM_EXPIRED, PRE_COOKIE, PRE_MAX_AGE, _container, _message, templates,
 )
 from solya.web.security import (
     ADMIN_COOKIE, ADMIN_MAX_AGE, RateLimiter, client_ip, cookie_params,
@@ -58,7 +58,16 @@ def _limiter(request: Request) -> RateLimiter:
 
 
 def _is_admin(request: Request) -> bool:
-    return _container(request).sessions.read_admin(request.cookies.get(ADMIN_COOKIE))
+    """A valid admin cookie signed after the last logout (kept in memory: a restart
+    forgets it, so old cookies then stay valid until they expire)."""
+    return _container(request).sessions.read_admin(
+        request.cookies.get(ADMIN_COOKIE), getattr(request.app.state, "admin_logout_at", None)
+    )
+
+
+def _no_store(resp):
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 def _login_page(request: Request, *, error: str | None = None, status: int = 200):
@@ -70,7 +79,7 @@ def _login_page(request: Request, *, error: str | None = None, status: int = 200
     )
     if request.cookies.get(PRE_COOKIE) != pre:
         resp.set_cookie(PRE_COOKIE, pre, **cookie_params(c.settings.public_base_url, PRE_MAX_AGE))
-    return resp
+    return _no_store(resp)
 
 
 @router.get("/login")
@@ -106,8 +115,11 @@ async def logout(request: Request, csrf: str = Form("")):
     _password(request)
     c = _container(request)
     cookie = request.cookies.get(ADMIN_COOKIE)
+    if not _is_admin(request):  # expired or already revoked: nothing to log out of
+        return RedirectResponse("/admin/login", status_code=303)
     if not c.sessions.check_csrf(cookie, csrf):
         return _message(request, FORM_EXPIRED, 403)
+    request.app.state.admin_logout_at = c.clock.now()  # revoke every cookie issued so far
     resp = RedirectResponse("/admin/login", status_code=303)
     resp.delete_cookie(ADMIN_COOKIE)
     return resp
@@ -164,7 +176,7 @@ async def admin_page(request: Request):
                 "credits": sum(c.budget.used_by_site(x.se_site_id, cycle_start) for x in sites),
                 "ai_tokens": int(tokens.get(owner.id) or 0),
             })
-    return templates.TemplateResponse(
+    return _no_store(templates.TemplateResponse(
         request, "admin.html",
         {
             "rows": rows,
@@ -172,4 +184,4 @@ async def admin_page(request: Request):
             "cap": c.settings.budget_monthly_credits,
             "csrf": c.sessions.csrf_token(request.cookies.get(ADMIN_COOKIE)),
         },
-    )
+    ))

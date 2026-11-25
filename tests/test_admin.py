@@ -191,3 +191,31 @@ def test_admin_csrf(tc):
     r = tc.post("/admin/logout", data={"csrf": csrf})
     assert r.status_code == 303 and r.headers["location"] == "/admin/login"
     assert tc.get("/admin").status_code == 303
+
+
+def test_admin_logout_revokes_cookie_server_side(tc, container):
+    assert _login(tc).status_code == 303
+    old = tc.cookies.get("solya_admin")
+    csrf = _csrf(tc.get("/admin").text)
+    assert tc.post("/admin/logout", data={"csrf": csrf}).status_code == 303
+    tc.cookies.clear()
+    tc.cookies.set("solya_admin", old)  # an attacker replays the copied cookie
+    r = tc.get("/admin")
+    assert r.status_code == 303 and r.headers["location"] == "/admin/login"
+    tc.cookies.clear()
+    container.clock.advance(timedelta(seconds=2))
+    assert _login(tc).status_code == 303  # a fresh login still works
+    assert tc.get("/admin").status_code == 200
+
+
+def test_admin_pages_no_store(tc):
+    assert tc.get("/admin/login").headers["cache-control"] == "no-store"
+    assert _login(tc).status_code == 303
+    assert tc.get("/admin").headers["cache-control"] == "no-store"
+
+
+def test_admin_logout_with_expired_cookie_redirects(tc, container):
+    assert _login(tc).status_code == 303
+    container.clock.advance(timedelta(hours=13))
+    r = tc.post("/admin/logout", data={"csrf": "stale"})
+    assert r.status_code == 303 and r.headers["location"] == "/admin/login"

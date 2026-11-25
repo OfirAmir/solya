@@ -7,7 +7,7 @@ Solya watches SolarEdge solar sites through the SolarEdge Monitoring **V2** API 
 - A rules engine with no LLM computes daily production, income in ₪, communication loss, zero production, open alerts and inverter faults.
 - The evening report is a card image plus a short text, sent about 30 minutes after the owner's latest local sunset. Faults, communication loss and reminders arrive as separate messages.
 - Owners can ask a few fixed questions (today, yesterday, this month, open alerts).
-- Admin work is done with the `solya` command line tool. There is no admin UI.
+- Admin work is done with the `solya` command line tool. A read-only page at `/admin` (password from `ADMIN_PASSWORD`) lists owners, sites and usage. Logout revokes the admin cookie in memory only: after a restart a copied cookie stays valid until it expires (12 h).
 
 RAY is a pluggable slot and is **disabled** until the real formula is supplied. While `RAY_IMPLEMENTATION` is unset, no RAY circle and no "RAY" word appear anywhere.
 
