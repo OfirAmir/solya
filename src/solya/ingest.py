@@ -13,12 +13,17 @@ from solya.db import SessionFactory, session_scope
 from solya.models import Site
 from solya.solaredge.budget import Priority
 from solya.solaredge.client import SolarEdgeClient
-from solya.solaredge.errors import AuthExpired
+from solya.solaredge.errors import AuthExpired, SolarEdgeError
 from solya.solaredge.models import Alert, InverterState, LifetimeEnergy, Overview, SiteInfo
 
 log = logging.getLogger(__name__)
 
 DEVICES_MAX_AGE = timedelta(days=7)
+# API failures plus anything an unexpected response shape can raise in a parser. They
+# cost only that call. Anything else (a database or token-store failure) aborts the pull.
+PER_CALL_ERRORS = (
+    SolarEdgeError, KeyError, IndexError, ValueError, TypeError, AttributeError, ArithmeticError,
+)
 T = TypeVar("T")
 
 
@@ -58,7 +63,7 @@ async def pull_site(
             return await fn()
         except AuthExpired:
             raise
-        except Exception as exc:  # noqa: BLE001 - an odd shape must not lose the other calls
+        except PER_CALL_ERRORS as exc:
             errors[name] = f"{type(exc).__name__}: {exc}"
             log.warning("site %s %s call failed: %s", site_id, name, type(exc).__name__)
             return None
