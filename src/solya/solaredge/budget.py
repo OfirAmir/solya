@@ -56,7 +56,10 @@ class CreditBudget:
             )
 
     def used_this_cycle(self) -> int:
-        return self._count_credited(self._cycle_start(self._clock.now()))
+        return self._count_credited(self.cycle_start())
+
+    def cycle_start(self) -> datetime:
+        return self._cycle_start(self._clock.now())
 
     def used_by_site(self, site_id: int, since: datetime) -> int:
         return self._count_credited(since, site_id)

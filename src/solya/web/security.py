@@ -96,6 +96,14 @@ class RateLimiter:
         self._now = (lambda: clock.now().timestamp()) if hasattr(clock, "now") else clock
         self._hits: dict[str, deque[float]] = defaultdict(deque)
 
+    def blocked(self, key: str) -> bool:
+        """True when the key is already at its limit; records nothing."""
+        now = self._now()
+        q = self._hits[key]
+        while q and q[0] <= now - self.window_s:
+            q.popleft()
+        return len(q) >= self.limit
+
     def hit(self, key: str) -> bool:
         """Record an attempt; False when the key is over the limit."""
         now = self._now()

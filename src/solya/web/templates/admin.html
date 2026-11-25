@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}לקוחות{% endblock %}
+{% block content %}
+    <section class="card">
+      <div class="row spread">
+        <h1>לקוחות</h1>
+        <form action="/admin/logout" method="post">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button class="button secondary" type="submit">יציאה</button>
+        </form>
+      </div>
+      <p class="total">קרדיטים במחזור: <bdi>{{ used }}/{{ cap }}</bdi></p>
+      <p class="note">האסימונים מוצפנים ולא מוצגים. הדף לקריאה בלבד, שינויים דרך שורת הפקודה.</p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>לקוח</th><th>מקור וסטטוס</th><th>טלגרם</th><th>מערכות</th>
+              <th>משיכה אחרונה</th><th>קרדיטים במחזור</th><th>טוקנים החודש</th>
+            </tr>
+          </thead>
+          <tbody>
+          {% for o in rows %}
+            <tr>
+              <td>
+                <strong>{{ o.name }}</strong>
+                <span class="note"><bdi dir="ltr">{{ o.email or "" }}</bdi></span>
+                <span class="note"><bdi dir="ltr">{{ o.phone or "" }}</bdi></span>
+              </td>
+              <td>{{ o.source }}<span class="note">{{ o.status }}</span></td>
+              <td>{{ "כן" if o.linked else "לא" }}</td>
+              <td>
+                {% for x in o.sites %}
+                <div class="adm-site">
+                  <strong>{{ x.name }}</strong> <bdi>{{ x.id }}</bdi>
+                  <span class="note">{{ "במעקב" if x.monitored else "לא במעקב" }} · {{ x.call_plan }} · {{ x.status }} · {{ x.comm_state }}</span>
+                </div>
+                {% else %}<span class="note">אין מערכות</span>{% endfor %}
+              </td>
+              <td>{% if o.last_pull %}<bdi dir="ltr">{{ o.last_pull }}</bdi>{% else %}אין{% endif %}</td>
+              <td>{{ o.credits }}</td>
+              <td>{{ o.ai_tokens }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+{% endblock %}

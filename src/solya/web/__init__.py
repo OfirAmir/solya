@@ -4,11 +4,12 @@ from pathlib import Path
 from fastapi import APIRouter, FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from solya.web import journey, oauth
+from solya.web import admin, journey, oauth
 
 router = APIRouter()
 router.include_router(oauth.router)
 router.include_router(journey.router)
+router.include_router(admin.router)
 
 _FONTS_DIR = Path(__file__).resolve().parent.parent / "render" / "fonts"
 

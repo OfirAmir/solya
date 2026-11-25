@@ -140,3 +140,13 @@ button, .button {
 .site > span { display: grid; gap: 2px; }
 .price { font-size: 14px; }
 .total { font-size: 18px; font-weight: 700; }
+
+/* admin table: scrolls inside its own box, never the whole page */
+.row.spread { justify-content: space-between; }
+.table-wrap { overflow-x: auto; max-width: 100%; margin-top: 12px; }
+table { border-collapse: collapse; width: 100%; min-width: 640px; font-size: 14px; }
+th, td { text-align: right; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 700; white-space: nowrap; }
+td .note { display: block; }
+.adm-site { margin-bottom: 6px; }
+main.grid > * { min-width: 0; }
