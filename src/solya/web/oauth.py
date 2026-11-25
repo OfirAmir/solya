@@ -11,6 +11,7 @@ from solya.db import session_scope
 from solya.models import Owner, Site
 from solya.services import onboarding
 from solya.solaredge.oauth import build_authorize_url, exchange_code
+from solya.web import journey
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -21,6 +22,13 @@ CANCELLED = "החיבור בוטל או נכשל. אפשר לנסות שוב ע�
 CONNECTED = "המערכת חוברה בהצלחה. אפשר לחזור לטלגרם."
 SITE_PICKER = "/sites"
 FAILED = "משהו השתבש בחיבור המערכת. אפשר לנסות שוב עם /connect."
+# F1: a web sign-up with no Telegram chat cannot use /connect in the bot; it retries on
+# the web instead, with a button back to the connect page.
+WEB_RETRY = "אפשר לנסות שוב:"
+WEB_INVALID_LINK = f"הקישור אינו בתוקף. {WEB_RETRY}"
+WEB_CANCELLED = f"החיבור בוטל או נכשל. {WEB_RETRY}"
+WEB_FAILED = f"משהו השתבש בחיבור המערכת. {WEB_RETRY}"
+_WEB_COPY = {INVALID_LINK: WEB_INVALID_LINK, CANCELLED: WEB_CANCELLED, FAILED: WEB_FAILED}
 
 
 def _continue_on_web(owner: Owner) -> bool:
@@ -40,6 +48,27 @@ def _html(text: str, status: int = 200) -> HTMLResponse:
     )
 
 
+def _is_unlinked_web_owner(request: Request, owner_id: int | None) -> bool:
+    """The owner of the resolved connect request, else the browser's web session."""
+    if owner_id is None:
+        sess = journey._session(request)
+        owner_id = sess[0] if sess is not None else None
+    if owner_id is None:
+        return False
+    with session_scope(request.app.state.container.session_factory) as s:
+        owner = s.get(Owner, owner_id)
+        return (owner is not None and owner.active and owner.signup_source == "web"
+                and owner.telegram_chat_id is None)
+
+
+def _failure(request: Request, text: str, status: int, owner_id: int | None = None):
+    """A failure page: bot owners keep the /connect copy, an unlinked web owner gets the
+    journey template with a button back to /connect-site."""
+    if _is_unlinked_web_owner(request, owner_id):
+        return journey._message(request, _WEB_COPY[text], status, retry_url=journey.AFTER_SIGNUP)
+    return _html(text, status)
+
+
 @router.get("/healthz")
 async def healthz() -> dict:
     return {"ok": True}
@@ -53,14 +82,14 @@ async def connect(token: str, request: Request):
         req = onboarding.resolve_connect_token(s, token, c.clock.now(), ttl)
         nonce = req.nonce if req is not None else None
     if nonce is None:
-        return _html(INVALID_LINK, 404)
+        return _failure(request, INVALID_LINK, 404)
     resp = RedirectResponse(build_authorize_url(c.settings, nonce), status_code=302)
     resp.set_cookie(COOKIE, token, max_age=ttl * 60, httponly=True, samesite="lax")
     return resp
 
 
 def _callback_failed(request: Request, reason: str, error: str | None = None,
-                     error_description: str | None = None) -> HTMLResponse:
+                     error_description: str | None = None, owner_id: int | None = None):
     """Log why a callback was refused: the parameter names and SolarEdge's error text,
     which are not secret. Never the values (``code`` is a credential)."""
     log.warning(
@@ -68,7 +97,7 @@ def _callback_failed(request: Request, reason: str, error: str | None = None,
         reason, sorted(request.query_params.keys()), error,
         (error_description or "")[:200] or None,
     )
-    return _html(CANCELLED, 400)
+    return _failure(request, CANCELLED, 400, owner_id)
 
 
 @router.get("/oauth/callback")
@@ -98,10 +127,11 @@ async def oauth_callback(
             s, external_id, state, request.cookies.get(COOKIE), c.clock.now(), ttl
         )
         token = req.token if req is not None else None
+        owner_id = req.owner_id if req is not None else None
     if token is None:
         log.warning("oauth callback refused (no usable connect request); params=%s cookie=%s",
                     sorted(request.query_params.keys()), COOKIE in request.cookies)
-        return _html(INVALID_LINK, 400)
+        return _failure(request, INVALID_LINK, 400)
     try:
         pair = await exchange_code(c.http, c.settings, code)
         # M4: prove the new grant can read site_id before anything is stored. SolarEdge's
@@ -110,9 +140,10 @@ async def oauth_callback(
     except Exception as e:
         log.error("oauth callback refused: code exchange or site access check failed: %s",
                   type(e).__name__)
-        return _html(FAILED, 502)
+        return _failure(request, FAILED, 502, owner_id)
     if info.site_id != site_id:
-        return _callback_failed(request, "granted site does not match site_id")
+        return _callback_failed(request, "granted site does not match site_id",
+                                owner_id=owner_id)
     try:
         # A site owned by someone else moves only because SolarEdge just proved this
         # grant can read it; the admin is told below (M4).
@@ -130,7 +161,7 @@ async def oauth_callback(
             await c.reporter.on_site_reassigned(sid, previous_owner, new_owner)
     except Exception as e:
         log.error("oauth callback failed after the site access check: %s", type(e).__name__)
-        return _html(FAILED, 502)
+        return _failure(request, FAILED, 502, owner_id)
     if to_picker:
         return RedirectResponse(SITE_PICKER, status_code=303)
     return _html(CONNECTED)

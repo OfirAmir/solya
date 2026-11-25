@@ -94,7 +94,8 @@ def _landing(request: Request, *, code: str = "", name: str = "", error: str | N
     return resp
 
 
-def _message(request: Request, text: str, status: int = 200, *, bot_link: bool = False):
+def _message(request: Request, text: str, status: int = 200, *, bot_link: bool = False,
+             retry_url: str | None = None):
     c = _container(request)
     return templates.TemplateResponse(
         request,
@@ -102,6 +103,7 @@ def _message(request: Request, text: str, status: int = 200, *, bot_link: bool =
         {
             "message": text,
             "bot_url": f"https://t.me/{c.settings.telegram_bot_username}" if bot_link else None,
+            "retry_url": retry_url,
         },
         status_code=status,
     )

@@ -603,3 +603,55 @@ def test_bot_owner_callback_unchanged(tc, container, load_fixture):
         assert CONNECTED in r.text
     assert _owner(container, owners[0]).subscription_status == "active"
     assert _owner(container, owners[1]).subscription_status == "lead"
+
+
+# --- OAuth failure pages for an unlinked web owner (final review F1) -------------------
+
+RETRY = "אפשר לנסות שוב:"
+RETRY_BUTTON = 'href="/connect-site"'
+
+
+def _assert_web_retry(r, status):
+    assert r.status_code == status
+    assert RETRY in r.text and RETRY_BUTTON in r.text and "חזרה לחיבור" in r.text
+    assert "/connect." not in r.text and "/connect בבוט" not in r.text
+    assert '<link rel="stylesheet" href="/static/style.css">' in r.text  # the journey template
+
+
+def test_web_owner_cancelled_callback_offers_connect_site(tc, container):
+    _web_owner(tc, container)
+    r = tc.get("/oauth/callback", params={"error": "access_denied", "error_description": "no"})
+    _assert_web_retry(r, 400)
+    assert "החיבור בוטל או נכשל." in r.text
+
+
+def test_web_owner_expired_connect_link_offers_connect_site(tc, container):
+    _web_owner(tc, container)
+    r = tc.get("/connect/no-such-token")
+    _assert_web_retry(r, 404)
+    assert "הקישור אינו בתוקף." in r.text
+
+
+@respx.mock
+def test_web_owner_failed_exchange_offers_connect_site_without_session(tc, container):
+    """No session cookie: the resolved connect request identifies the web owner."""
+    owner_id = _web_owner(tc, container)
+    with session_scope(container.session_factory) as s:
+        token = onboarding.create_connect_request(
+            s, owner_id, container.clock.now(), container.settings).rsplit("/", 1)[1]
+        nonce = s.get(ConnectRequest, token).nonce
+    respx.post("https://monitoringapi.solaredge.com/v2/oauth2/token").mock(
+        return_value=httpx.Response(500))
+    tc.cookies.clear()
+    r = tc.get("/oauth/callback", params={"code": CODE, "site_id": FARM_ID, "state": nonce})
+    _assert_web_retry(r, 502)
+    assert "משהו השתבש בחיבור המערכת." in r.text
+
+
+def test_linked_web_owner_and_no_session_keep_bot_copy(tc, container):
+    r = tc.get("/oauth/callback", params={"error": "access_denied"})
+    assert "אפשר לנסות שוב עם /connect." in r.text and RETRY_BUTTON not in r.text
+    owner_id = _web_owner(tc, container)
+    _link(container, owner_id)
+    r = tc.get("/oauth/callback", params={"error": "access_denied"})
+    assert "אפשר לנסות שוב עם /connect." in r.text and RETRY_BUTTON not in r.text
