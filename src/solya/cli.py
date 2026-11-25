@@ -338,7 +338,7 @@ def cmd_replay(args, settings: Settings, clock: Clock) -> int:
               f"export_wh={day.export_wh} income_ils={day.income_ils} ray={day.ray}")
         for d in detected or []:
             print(f"detected fault (not saved): {d.key} ({d.code})")
-        if not detected:
+        if detected == []:  # a stale site (None) already said so above
             print("no faults detected")
         if args.dry_run:
             s.rollback()

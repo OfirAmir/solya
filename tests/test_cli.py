@@ -208,6 +208,17 @@ def test_replay_dry_run_writes_nothing(cfg, factory, load_fixture):
         assert s.get(DailyMetric, (FARM, DAY)) is None
 
 
+def test_replay_stale_says_no_faults_once(cfg, factory, load_fixture, capsys):
+    seed_sites(factory)
+    site = {**load_fixture("solaredge/site_farm.json"), "lastUpdateTime": "2026-11-24T08:00:00+02:00"}
+    _raw(factory, load_fixture, f"/sites/{FARM}", None, FETCHED, override=site)
+    _raw(factory, load_fixture, f"/sites/{FARM}/overview", "solaredge/overview_farm_20261124.json", FETCHED)
+    assert run(cfg, "replay", "--site", str(FARM), "--date", "2026-11-24", "--dry-run") == 0
+    out = capsys.readouterr().out
+    assert "site data is stale" in out
+    assert out.count("no faults detected") == 1
+
+
 def test_replay_without_stored_data_fails(cfg, factory, capsys):
     seed_sites(factory)
     assert run(cfg, "replay", "--site", str(FARM), "--date", "2026-11-24") == 1
