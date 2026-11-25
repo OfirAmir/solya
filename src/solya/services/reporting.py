@@ -473,6 +473,18 @@ class Reporter:
                 )
             )
 
+    async def on_site_reassigned(self, site_id: int, old_owner: int, new_owner: int) -> None:
+        """M4: tell the admins that a connect moved a site from one owner to another."""
+        stamp = self._clock.now().isoformat()
+        for chat_id in self._settings.admin_chat_ids:
+            await self._send(
+                OutboundMessage(
+                    str(chat_id), "reply",
+                    f"האתר {site_id} הועבר מבעלים {old_owner} לבעלים {new_owner}", None,
+                    f"admin_reassign:{site_id}:{new_owner}:{stamp}:{chat_id}",
+                )
+            )
+
     async def on_site_connected(self, site: Site | int, is_first: bool) -> None:
         site_id = _site_id(site)
         now = self._clock.now()

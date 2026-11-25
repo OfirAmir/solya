@@ -8,6 +8,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from solya.db import session_scope
+from solya.models import Site
 from solya.services import onboarding
 from solya.solaredge.oauth import build_authorize_url, exchange_code
 
@@ -96,9 +97,13 @@ async def oauth_callback(
         info = await c.client.get_site(site_id)
         with session_scope(c.session_factory) as s:
             req = s.get(onboarding.ConnectRequest, token)
+            existing = s.get(Site, info.site_id)
+            previous_owner = existing.owner_id if existing is not None else None
             site, is_first = onboarding.register_site(s, req, info, c.clock.now())
-            sid = site.se_site_id
+            sid, new_owner = site.se_site_id, site.owner_id
         await c.reporter.on_site_connected(sid, is_first)
+        if previous_owner is not None and previous_owner != new_owner:
+            await c.reporter.on_site_reassigned(sid, previous_owner, new_owner)
     except Exception as e:
         log.error("oauth callback failed after code exchange: %s", type(e).__name__)
         return _html(FAILED, 502)

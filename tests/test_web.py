@@ -228,3 +228,26 @@ def test_rejected_bot_token_not_printed(settings, clock, tmp_path, monkeypatch):
     shown = "".join(traceback.format_exception(ei.value))
     assert secret not in shown and secret.split(":")[1] not in shown
     assert "TELEGRAM_BOT_TOKEN" in shown
+
+
+@respx.mock
+def test_callback_reassigning_site_notifies_admin(env, load_fixture):
+    """M4: connecting a site already registered to another owner alerts the admin."""
+    tc, container, channel, token = env
+    container.settings.admin_chat_ids = [999]
+    with session_scope(container.session_factory) as s:
+        other = Owner(display_name="Other", telegram_chat_id=777, active=True,
+                      created_at=container.clock.now())
+        s.add(other)
+        s.flush()
+        s.add(Site(se_site_id=SITE_ID, owner_id=other.id, portal_name="old",
+                   tz="Asia/Jerusalem", created_at=container.clock.now()))
+        other_id = other.id
+    _mock_se(load_fixture("solaredge/site_home.json"))
+    nonce = _nonce(container, token)
+    r = tc.get("/oauth/callback", params={"code": CODE, "site_id": SITE_ID, "state": nonce})
+    assert r.status_code == 200
+    admin = [m for m in channel.sent if m.recipient == "999"]
+    assert len(admin) == 1
+    assert str(SITE_ID) in admin[0].text and str(other_id) in admin[0].text
+    assert admin[0].text.startswith("האתר")

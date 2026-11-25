@@ -1,6 +1,7 @@
 """Invite-only onboarding and OAuth connect-request bookkeeping."""
 from __future__ import annotations
 
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 
@@ -11,6 +12,8 @@ from solya.config import Settings
 from solya.rules.faults import ack_owner_faults
 from solya.models import ConnectRequest, Invite, Owner, Site
 from solya.solaredge.models import SiteInfo
+
+log = logging.getLogger(__name__)
 
 COMMERCIAL_KWP = 50
 
@@ -128,6 +131,9 @@ def register_site(
         session.add(site)
     else:
         first = False
+        if site.owner_id != req.owner_id:  # M4: the caller also tells the admin
+            log.warning("site %s reassigned from owner %s to owner %s",
+                        info.site_id, site.owner_id, req.owner_id)
         site.owner_id = req.owner_id
         site.portal_name = info.name
         site.peak_power_kwp_reported = info.peak_power_kwp

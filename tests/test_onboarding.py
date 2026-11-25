@@ -87,3 +87,27 @@ def test_reconnect_resets_status(db, settings):
         assert site.status == "active" and not first
         assert site.label_he == "משק" and site.portal_name == "New"
         assert s.query(Site).count() == 1 and s.query(Owner).count() == 1
+
+
+def test_register_site_owner_change_is_logged(db, settings, caplog):
+    """M4: a site moving to another owner is logged (and the callback tells the admin)."""
+    import logging
+
+    with db() as s:
+        first, second = _owner(s, chat=1), _owner(s, chat=2)
+        ob.register_site(s, _req(s, settings, first), _info(7, 10.0), NOW)
+        with caplog.at_level(logging.WARNING, logger="solya"):
+            site, _ = ob.register_site(s, _req(s, settings, second), _info(7, 10.0), NOW)
+        assert site.owner_id == second.id
+    assert f"site 7 reassigned from owner {first.id} to owner {second.id}" in caplog.text
+
+
+def test_register_site_same_owner_not_logged(db, settings, caplog):
+    import logging
+
+    with db() as s:
+        owner = _owner(s)
+        ob.register_site(s, _req(s, settings, owner), _info(7, 10.0), NOW)
+        with caplog.at_level(logging.WARNING, logger="solya"):
+            ob.register_site(s, _req(s, settings, owner), _info(7, 10.0), NOW)
+    assert "reassigned" not in caplog.text
