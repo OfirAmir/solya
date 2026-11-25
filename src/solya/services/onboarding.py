@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from solya.config import Settings
@@ -66,11 +67,16 @@ def link_chat(
     holder = get_owner_by_chat(session, chat_id)
     if holder is not None and holder.id != owner.id:
         return "bound_elsewhere"
-    claimed = session.execute(
-        update(Owner)
-        .where(Owner.id == owner.id, Owner.link_token == link_token)
-        .values(telegram_chat_id=chat_id, link_token=None, last_inbound_at=now)
-    ).rowcount
+    try:
+        with session.begin_nested():  # a race lost to the unique chat id undoes only this
+            claimed = session.execute(
+                update(Owner)
+                .where(Owner.id == owner.id, Owner.link_token == link_token)
+                .values(telegram_chat_id=chat_id, link_token=None, last_inbound_at=now)
+            ).rowcount
+    except IntegrityError:
+        log.info("chat %s was bound to another owner while linking owner %s", chat_id, owner.id)
+        return "bound_elsewhere"
     if claimed != 1:
         return "unknown"
     session.expire(owner)

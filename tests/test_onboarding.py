@@ -129,3 +129,23 @@ def test_register_site_same_owner_not_logged(db, settings, caplog):
         with caplog.at_level(logging.WARNING, logger="solya"):
             ob.register_site(s, _req(s, settings, owner), _info(7, 10.0), NOW)
     assert "reassigned" not in caplog.text
+
+
+def test_link_chat_race_bound_elsewhere(db, monkeypatch):
+    """Another owner takes the chat between the holder check and the UPDATE: the unique
+    constraint fires, only the savepoint is rolled back, and the result is bound_elsewhere."""
+    with db() as s:
+        holder = _owner(s, chat=555)
+        web = Owner(display_name="דנה", link_token="tok-race", signup_source="web",
+                    active=True, created_at=NOW)
+        s.add(web)
+        s.flush()
+        holder_id, web_id = holder.id, web.id
+        monkeypatch.setattr(ob, "get_owner_by_chat", lambda session, chat_id: None)
+        assert ob.link_chat(s, "tok-race", 555, NOW) == "bound_elsewhere"
+        # the outer transaction is still usable and earlier work in it survives
+        s.commit()
+    with db() as s:
+        assert s.get(Owner, holder_id).telegram_chat_id == 555
+        web = s.get(Owner, web_id)
+        assert web.telegram_chat_id is None and web.link_token == "tok-race"
