@@ -46,6 +46,9 @@ log = logging.getLogger(__name__)
 
 RETRY_DELAY = timedelta(minutes=30)
 KEEPALIVE_AFTER = timedelta(days=7)
+# The daily keep-alive job starts a little earlier than last week's run finished its
+# refresh, so a strict 7-day cutoff would skip the token for a whole extra day.
+KEEPALIVE_SLACK = timedelta(hours=1)
 WELCOME_2_DELAY_SECONDS = 60
 
 CARD_NOTES = {
@@ -399,7 +402,7 @@ class Reporter:
 
     async def keepalive(self) -> None:
         """Refresh tokens idle for 7 days (paused sites included) to beat the 14-day expiry."""
-        cutoff = self._clock.now() - KEEPALIVE_AFTER
+        cutoff = self._clock.now() - KEEPALIVE_AFTER + KEEPALIVE_SLACK
         with session_scope(self._sf) as s:
             site_ids = list(
                 s.scalars(

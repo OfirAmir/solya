@@ -545,6 +545,21 @@ async def test_keepalive_refreshes_idle_tokens(h):
         assert s.get(SiteToken, FARM).refreshed_at == NOW - timedelta(days=2)
 
 
+async def test_keepalive_weekly_from_daily_job(h):
+    """A refresh made by last week's run (a moment after it started) is due again today."""
+    with session_scope(h.db) as s:
+        s.get(SiteToken, HOME).refreshed_at = NOW - timedelta(days=7) + timedelta(seconds=2)
+        s.get(SiteToken, FARM).refreshed_at = NOW - timedelta(days=6)
+    with respx.mock:
+        route = respx.post(TOKEN_URL).mock(return_value=httpx.Response(
+            200, json={"access_token": "a2", "refresh_token": "r2", "expires_in": 7200}))
+        await h.reporter.keepalive()
+    assert route.call_count == 1
+    with session_scope(h.db) as s:
+        assert s.get(SiteToken, HOME).refreshed_at == NOW
+        assert s.get(SiteToken, FARM).refreshed_at == NOW - timedelta(days=6)
+
+
 async def test_keepalive_includes_paused_skips_reauth(h):
     with session_scope(h.db) as s:
         for sid in (FARM, HOME):
