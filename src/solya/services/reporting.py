@@ -1,0 +1,458 @@
+"""Reporting jobs: evening pull and report, mid-day check, fault and comm alerts,
+reminders, keep-alive and the connect/reauth messages.
+
+Every outgoing text passes through ``rtl_text`` (R14) and every delivery is isolated,
+so one failing owner or message never blocks the others (R15).
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections.abc import Awaitable, Callable
+from datetime import date, datetime, timedelta
+from decimal import Decimal
+from zoneinfo import ZoneInfo
+
+from sqlalchemy import inspect, select
+from sqlalchemy.orm import Session
+
+from solya.clock import Clock
+from solya.config import Settings
+from solya.db import SessionFactory, session_scope
+from solya.ingest import PullBundle, pull_site
+from solya.messaging.base import Channel, Ok, OutboundMessage
+from solya.messaging.outbox import Outbox
+from solya.models import DailyMetric, FaultRecord, Owner, Site, SiteToken
+from solya.render.card import CardData, CardRow, render_card
+from solya.rules.comms import is_stale
+from solya.rules.daily import FaultView, SiteDay, compute_site_day, effective_label, persist_site_day
+from solya.rules.faults import (
+    ClosedFault,
+    NewFault,
+    detect_faults,
+    due_reminders,
+    open_fault_views,
+    sync_faults,
+)
+from solya.rules.ray import RayCalculator, weighted_ray
+from solya.scheduler import is_daylight
+from solya.services.onboarding import create_connect_request
+from solya.solaredge.client import SolarEdgeClient
+from solya.solaredge.errors import AuthExpired, BudgetExceeded
+from solya.solaredge.oauth import TokenManager
+from solya.text import he
+from solya.text.rtl import rtl_text
+
+log = logging.getLogger(__name__)
+
+RETRY_DELAY = timedelta(minutes=30)
+KEEPALIVE_AFTER = timedelta(days=7)
+WELCOME_2_DELAY_SECONDS = 60
+
+CARD_NOTES = {
+    "comm_loss": "אין תקשורת",
+    "no_data": "אין נתונים",
+    "reauth_needed": "נדרש חיבור מחדש",
+}
+
+ScheduleRetry = Callable[[int, datetime], None]
+DelaySend = Callable[[float, Callable[[], Awaitable[object]]], None]
+# A message plus, optionally, the (fault id, column) to stamp once it is delivered.
+Outgoing = tuple[OutboundMessage, tuple[int, str] | None]
+
+
+def _view(rec: FaultRecord) -> FaultView:
+    return FaultView(rec.code, rec.serial, rec.first_seen, rec.source)
+
+
+def _owner_sites(session: Session, owner_id: int) -> list[Site]:
+    return list(
+        session.scalars(select(Site).where(Site.owner_id == owner_id).order_by(Site.se_site_id))
+    )
+
+
+def _budget_refused(bundle: PullBundle) -> bool:
+    return any(e.startswith(BudgetExceeded.__name__) for e in bundle.errors.values())
+
+
+def _site_id(site: Site | int) -> int:
+    if isinstance(site, int):
+        return site
+    identity = inspect(site).identity  # readable even on a detached, expired instance
+    return identity[0] if identity else site.se_site_id
+
+
+class Reporter:
+    def __init__(
+        self,
+        session_factory: SessionFactory,
+        client: SolarEdgeClient,
+        tokens: TokenManager,
+        outbox: Outbox,
+        channel: Channel,
+        clock: Clock,
+        settings: Settings,
+        ray: RayCalculator,
+        schedule_retry: ScheduleRetry,
+        delay_send: DelaySend | None = None,
+    ) -> None:
+        self._sf = session_factory
+        self._client = client
+        self._tokens = tokens
+        self._outbox = outbox
+        self.channel = channel
+        self._clock = clock
+        self._settings = settings
+        self._ray = ray
+        self.schedule_retry = schedule_retry
+        self._delay_send = delay_send or self._default_delay_send
+        self._retry_requested: set[tuple[int, date]] = set()
+        self._background: set[asyncio.Task] = set()
+
+    # ------------------------------------------------------------------ pulls
+
+    async def evening_pull(self, site_id: int, local_date: date | None = None) -> None:
+        await self._pull_and_process(site_id, "evening", local_date)
+
+    async def midday_check(self, site_id: int) -> None:
+        await self._pull_and_process(site_id, "midday", None)
+
+    async def _pull_and_process(self, site_id: int, kind: str, local_date: date | None) -> None:
+        now = self._clock.now()
+        with session_scope(self._sf) as s:
+            site = s.get(Site, site_id)
+            if site is None:
+                log.warning("%s pull: unknown site %s", kind, site_id)
+                return
+            if site.status != "active":
+                log.info("%s pull skipped for site %s (status %s)", kind, site_id, site.status)
+                return
+            tz = site.tz
+            # R1: the evening status window covers the whole daylight period.
+            daylight = True if kind == "evening" else is_daylight(site, now)
+        if local_date is None:
+            local_date = now.astimezone(ZoneInfo(tz)).date()
+
+        try:
+            bundle = await pull_site(self._client, self._sf, self._clock, site_id, kind, local_date)
+        except AuthExpired:
+            log.warning("site %s needs re-authorization; %s pull skipped", site_id, kind)
+            return
+        except BudgetExceeded:
+            log.warning("site %s: credit budget exceeded; %s pull skipped", site_id, kind)
+            return
+        if bundle.errors:
+            log.warning("site %s %s pull incomplete: %s", site_id, kind, sorted(bundle.errors))
+        if kind == "midday" and _budget_refused(bundle):
+            log.warning("site %s: credit budget exceeded; midday check skipped", site_id)
+            return
+
+        outgoing, no_data = self._process(site_id, kind, local_date, bundle, daylight)
+        for msg, stamp in outgoing:
+            await self._send(msg, stamp)
+
+        if no_data and (site_id, local_date) not in self._retry_requested:
+            self._retry_requested.add((site_id, local_date))
+            try:
+                self.schedule_retry(site_id, self._clock.now() + RETRY_DELAY)
+            except Exception:
+                log.exception("could not schedule retry pull for site %s", site_id)
+
+    def _process(
+        self, site_id: int, kind: str, local_date: date, bundle: PullBundle, daylight: bool
+    ) -> tuple[list[Outgoing], bool]:
+        now = self._clock.now()
+        stale_after = self._settings.stale_after_minutes
+        no_data = False
+        with session_scope(self._sf) as s:
+            site = s.get(Site, site_id)
+            owner = s.get(Owner, site.owner_id)
+            count = len(_owner_sites(s, owner.id))
+            label = effective_label(site, count)
+            tz = ZoneInfo(site.tz)
+            local_now = now.astimezone(tz)
+
+            events = []
+            detected = detect_faults(
+                bundle, list(site.expected_inverters or []), now, daylight, kind, stale_after
+            )
+            if detected is not None:  # R12: stale data never touches fault records
+                data_complete = "alerts" not in bundle.errors and "inverters" not in bundle.errors
+                events = sync_faults(s, site_id, detected, now, data_complete)
+
+            if kind == "evening":
+                day = compute_site_day(
+                    site, count, bundle, open_fault_views(s, site_id), now, self._settings,
+                    self._ray, local_date=local_date, session=s,
+                )
+                lifetime_wh = bundle.lifetime.energy_wh if bundle.lifetime is not None else None
+                as_of = (bundle.site.last_update_time if bundle.site is not None else None) or bundle.pulled_at
+                persist_site_day(s, day, local_date, lifetime_wh, as_of, computed_at=now)
+                no_data = day.state == "no_data"
+
+            comm = self._comm_transition(site, bundle, now)
+
+            if not owner.active:
+                return [], no_data
+            chat, name = str(owner.telegram_chat_id), owner.display_name
+            fault_label = label if count > 1 else None
+            out: list[Outgoing] = []
+            for ev in events:
+                rec = ev.record
+                if isinstance(ev, NewFault):
+                    text = he.fault_alert(
+                        name, fault_label, _view(rec), local_now, rec.first_seen.astimezone(tz)
+                    )
+                    out.append((OutboundMessage(chat, "fault", text, None, f"fault:{site_id}:{rec.key}"),
+                                (rec.id, "notified_at")))
+                elif isinstance(ev, ClosedFault):
+                    text = he.fault_closed(name, _view(rec), local_now)
+                    out.append((OutboundMessage(chat, "fault", text, None, f"closed:{site_id}:{rec.key}"),
+                                (rec.id, "closed_notified_at")))
+            if comm is not None:
+                change, since = comm
+                if change == "loss":
+                    text = he.comm_loss_alert(name, label, since.astimezone(tz), local_now)
+                    key = f"comm:{site_id}:{since.isoformat()}"
+                else:
+                    text = he.comm_restored(name, label, local_now)
+                    key = f"comm_restored:{site_id}:{since.isoformat()}"
+                out.append((OutboundMessage(chat, "comm_loss", text, None, key), None))
+        return out, no_data
+
+    def _comm_transition(
+        self, site: Site, bundle: PullBundle, now: datetime
+    ) -> tuple[str, datetime] | None:
+        """Update Site.comm_state/comm_since; return ("loss"|"restored", episode start)."""
+        if bundle.site is None:  # no fresh /sites answer: nothing new to conclude
+            return None
+        last_update = bundle.site.last_update_time
+        stale = is_stale(last_update, now, self._settings.stale_after_minutes)
+        if stale and site.comm_state != "loss":
+            site.comm_state = "loss"
+            # A site that never reported has no lastUpdateTime: date the loss from the pull.
+            site.comm_since = last_update or bundle.pulled_at
+            return "loss", site.comm_since
+        if not stale and site.comm_state == "loss":
+            since = site.comm_since or now
+            site.comm_state = "ok"
+            site.comm_since = None
+            return "restored", since
+        return None
+
+    # ----------------------------------------------------------------- report
+
+    async def evening_report(self, owner_id: int, local_date: date, retry: bool = False) -> None:
+        now = self._clock.now()
+        with session_scope(self._sf) as s:
+            owner = s.get(Owner, owner_id)
+            if owner is None or not owner.active:
+                log.info("evening report skipped for inactive or unknown owner %s", owner_id)
+                return
+            sites = _owner_sites(s, owner_id)
+            shown = [site for site in sites if site.status != "paused"]
+            if not shown:
+                return
+            days = [self._stored_day(s, site, len(sites), local_date, now) for site in shown]
+            chat, name = str(owner.telegram_chat_id), owner.display_name
+            local_dt = now.astimezone(ZoneInfo(shown[0].tz))
+
+        show_total = len(days) > 1 and all(
+            d.state == "ok" and d.production_wh is not None and d.income_ils is not None
+            for d in days
+        )
+        total = None
+        if show_total:
+            total = (
+                sum(d.production_wh for d in days),
+                sum((d.income_ils for d in days), Decimal("0")),
+            )
+        card = CardData(
+            ray=weighted_ray([(d.ray, d.kwp) for d in days]),
+            rows=[self._card_row(d) for d in days],
+            total=total,
+            date_label=f"{local_date:%d.%m.%Y}",
+        )
+        text = he.daily_report(name, days, local_dt, show_total)
+        try:
+            png = render_card(card)
+        except Exception:
+            log.exception("card render failed for owner %s; sending text only", owner_id)
+            png = None
+        key = f"report:{owner_id}:{local_date.isoformat()}" + (":retry" if retry else "")
+        await self._send(OutboundMessage(chat, "report", text, png, key))
+
+    def _stored_day(
+        self, s: Session, site: Site, owner_site_count: int, local_date: date, now: datetime
+    ) -> SiteDay:
+        day = SiteDay(
+            site_id=site.se_site_id,
+            label=effective_label(site, owner_site_count),
+            card_name=site.card_name or site.portal_name,
+            state="ok",
+            open_faults=open_fault_views(s, site.se_site_id),
+            kwp=site.billing_kwp_override or site.peak_power_kwp_reported,
+        )
+        if site.status == "reauth_needed":
+            day.state = "reauth_needed"
+        elif site.comm_state == "loss":
+            day.state = "comm_loss"
+            day.comm_since = (site.comm_since or now).astimezone(ZoneInfo(site.tz))
+        else:
+            row = s.get(DailyMetric, (site.se_site_id, local_date))
+            if row is None or row.production_wh is None:
+                day.state = "no_data"
+            else:
+                day.production_wh = row.production_wh
+                day.export_wh = row.export_wh
+                day.self_consumption_wh = row.self_consumption_wh
+                day.income_ils = row.income_ils
+                day.ray = row.ray
+        return day
+
+    @staticmethod
+    def _card_row(d: SiteDay) -> CardRow:
+        if d.state != "ok":
+            return CardRow(d.card_name, None, None, CARD_NOTES[d.state])
+        return CardRow(d.card_name, d.production_wh, d.income_ils, None)
+
+    async def retry_pull_and_report(self, site_id: int, local_date: date) -> None:
+        await self.evening_pull(site_id, local_date)
+        with session_scope(self._sf) as s:
+            site = s.get(Site, site_id)
+            if site is None:
+                return
+            row = s.get(DailyMetric, (site_id, local_date))
+            recovered = (
+                site.status == "active"
+                and site.comm_state != "loss"
+                and row is not None
+                and row.production_wh is not None
+            )
+            owner_id = site.owner_id
+        if recovered:
+            await self.evening_report(owner_id, local_date, retry=True)
+        else:
+            log.info("retry pull for site %s still has no data; no report re-sent", site_id)
+
+    # ---------------------------------------------------- reminders, tokens
+
+    async def send_reminders(self) -> None:
+        now = self._clock.now()
+        outgoing: list[Outgoing] = []
+        with session_scope(self._sf) as s:
+            for rec in due_reminders(s, now, self._settings.fault_reminder_hours):
+                site = s.get(Site, rec.site_id)
+                owner = s.get(Owner, site.owner_id) if site is not None else None
+                if owner is None or not owner.active:
+                    continue
+                text = he.fault_reminder(
+                    owner.display_name, _view(rec), now.astimezone(ZoneInfo(site.tz))
+                )
+                msg = OutboundMessage(
+                    str(owner.telegram_chat_id), "fault", text, None,
+                    f"reminder:{rec.site_id}:{rec.key}",
+                )
+                outgoing.append((msg, (rec.id, "reminded_at")))
+        for msg, stamp in outgoing:
+            await self._send(msg, stamp)
+
+    async def keepalive(self) -> None:
+        """Refresh tokens idle for 7 days (paused sites included) to beat the 14-day expiry."""
+        cutoff = self._clock.now() - KEEPALIVE_AFTER
+        with session_scope(self._sf) as s:
+            site_ids = list(
+                s.scalars(
+                    select(SiteToken.site_id)
+                    .join(Site, Site.se_site_id == SiteToken.site_id)
+                    .where(Site.status != "reauth_needed", SiteToken.refreshed_at < cutoff)
+                    .order_by(SiteToken.site_id)
+                )
+            )
+        for site_id in site_ids:
+            try:
+                await self._tokens.force_refresh(site_id)
+                log.info("keep-alive refreshed token for site %s", site_id)
+            except Exception as e:
+                log.warning("keep-alive refresh failed for site %s: %s", site_id, type(e).__name__)
+
+    # ------------------------------------------------------ connect, reauth
+
+    async def on_reauth_needed(self, site_id: int) -> None:
+        now = self._clock.now()
+        owner_msg = None
+        with session_scope(self._sf) as s:
+            site = s.get(Site, site_id)
+            if site is None:
+                return
+            local_now = now.astimezone(ZoneInfo(site.tz))
+            owner = s.get(Owner, site.owner_id)
+            if owner is not None and owner.active:
+                label = effective_label(site, len(_owner_sites(s, owner.id)))
+                url = create_connect_request(s, owner.id, now, self._settings)
+                owner_msg = OutboundMessage(
+                    str(owner.telegram_chat_id), "reply",
+                    he.reauth_link(owner.display_name, label, url, local_now), None,
+                    f"reauth:{site_id}:{local_now.date().isoformat()}",
+                )
+        if owner_msg is not None:
+            await self._send(owner_msg)
+        for chat_id in self._settings.admin_chat_ids:
+            await self._send(
+                OutboundMessage(
+                    str(chat_id), "reply", f"נדרש חיבור מחדש לאתר {site_id}", None,
+                    f"admin_reauth:{site_id}:{local_now.date().isoformat()}:{chat_id}",
+                )
+            )
+
+    async def on_site_connected(self, site: Site | int, is_first: bool) -> None:
+        site_id = _site_id(site)
+        now = self._clock.now()
+        with session_scope(self._sf) as s:
+            row = s.get(Site, site_id)
+            owner = s.get(Owner, row.owner_id)
+            chat, owner_id, portal_name = str(owner.telegram_chat_id), owner.id, row.portal_name
+        await self._send(
+            OutboundMessage(chat, "welcome", he.site_connected(portal_name), None,
+                            f"connected:{site_id}:{now.isoformat()}")
+        )
+        if not is_first:
+            return
+        await self._send(OutboundMessage(chat, "welcome", he.WELCOME_1, None, f"welcome1:{owner_id}"))
+        second = OutboundMessage(chat, "welcome", he.WELCOME_2, None, f"welcome2:{owner_id}")
+        self._delay_send(WELCOME_2_DELAY_SECONDS, lambda: self._send(second))
+
+    # -------------------------------------------------------------- delivery
+
+    def _default_delay_send(
+        self, seconds: float, coro_factory: Callable[[], Awaitable[object]]
+    ) -> None:
+        async def later() -> None:
+            await asyncio.sleep(seconds)
+            await coro_factory()
+
+        task = asyncio.get_running_loop().create_task(later())
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
+    async def _send(self, msg: OutboundMessage, stamp: tuple[int, str] | None = None) -> bool:
+        """Deliver one message; never raises. Stamps the fault column only on success."""
+        msg.text = rtl_text(msg.text)
+        try:
+            result = await self._outbox.deliver(self.channel, msg)
+        except Exception:
+            log.exception("delivery of %s failed", msg.dedupe_key)
+            return False
+        if not isinstance(result, Ok):
+            log.warning("delivery of %s not completed: %s", msg.dedupe_key, type(result).__name__)
+            return False
+        if stamp is not None:
+            fault_id, column = stamp
+            try:
+                with session_scope(self._sf) as s:
+                    rec = s.get(FaultRecord, fault_id)
+                    if rec is not None and getattr(rec, column) is None:
+                        setattr(rec, column, self._clock.now())
+            except Exception:
+                log.exception("could not record %s for fault %s", column, fault_id)
+        return True
