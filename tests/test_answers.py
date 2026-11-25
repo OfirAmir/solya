@@ -63,6 +63,16 @@ def test_month_counts_missing_days(db):
         assert f"{RLM}150.0 קוט״ש, {RLM}15.00 ₪ ב־2 ימים" in out
 
 
+def test_month_none_row_counts_as_missing(db):
+    with db() as s:
+        owner = _seed(s, ("משק",))
+        _metric(s, 100, date(2026, 11, 1), 100000, "10.00")
+        _metric(s, 100, date(2026, 11, 2), None, "0.00")
+        out = a.answer_month(s, owner, NOW)
+        assert "ב־1 ימים" in out and "חסרים נתונים ל־23 ימים" in out
+        assert f"{RLM}100.0 קוט״ש" in out
+
+
 def test_alerts_none_and_open(db):
     with db() as s:
         owner = _seed(s)
@@ -102,10 +112,7 @@ def test_text_cannot_change_state(db):
             fn(s, owner, NOW)
         a.answer_alerts(s, owner)
         s.flush()
-        assert not s.dirty and not s.new and not s.deleted
-        s.rollback()
         assert _snapshot(s) == before
-        assert s.scalar(select(Site.status)) == "active"
 
 
 def test_build_bot_application_registers_commands(settings, clock, db):

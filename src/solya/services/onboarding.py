@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from solya.config import Settings
+from solya.rules.faults import ack_owner_faults
 from solya.models import ConnectRequest, Invite, Owner, Site
 from solya.solaredge.models import SiteInfo
 
@@ -139,3 +140,13 @@ def register_site(
     req.site_id = info.site_id
     session.flush()
     return site, first
+
+
+def record_inbound(session: Session, owner: Owner, now: datetime) -> None:
+    """Inbound message side effects: stamp last_inbound_at, ack notified faults,
+    and reactivate an owner who had blocked the bot (R16)."""
+    owner.last_inbound_at = now
+    if not owner.active:
+        owner.active = True
+    ack_owner_faults(session, owner.id, now)
+    session.flush()

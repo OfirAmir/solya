@@ -15,7 +15,6 @@ from telegram.ext import (
 )
 
 from solya.db import session_scope
-from solya.rules.faults import ack_owner_faults
 from solya.services import answers, onboarding
 from solya.text.he import HELP, INVITE_OK, NOT_INVITED, connect_link
 from solya.text.rtl import rtl_text
@@ -81,8 +80,7 @@ def build_bot_application(token: str, container) -> Application:
                 text = NOT_INVITED
             else:
                 if ack:
-                    ack_owner_faults(s, owner.id, now)
-                    owner.last_inbound_at = now
+                    onboarding.record_inbound(s, owner, now)
                     route = answers.route_text(update.effective_message.text or "")
                 text = answers.answer_for(route, s, owner, now)
         await reply(update, text)

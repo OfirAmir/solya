@@ -101,11 +101,12 @@ def answer_month(session: Session, owner: Owner, now: datetime) -> str:
                 DailyMetric.local_date <= today,
             )
         ).all()
+        rows = [r for r in rows if r.production_wh is not None]
         n = len(rows)
         if n == 0:
             lines.append(f"{label}: {NO_DATA_YET}")
             continue
-        wh = sum(r.production_wh or 0.0 for r in rows)
+        wh = sum(r.production_wh for r in rows)
         incomes = [r.income_ils for r in rows if r.income_ils is not None]
         income = sum(incomes, Decimal("0")) if incomes else None
         text = f"{label}: {_figures(wh, income)} ב־{n} ימים"
