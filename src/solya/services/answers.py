@@ -37,9 +37,12 @@ def route_text(text: str) -> Route:
 
 
 def _sites(session: Session, owner: Owner) -> list[Site]:
+    """The owner's monitored sites: an unmonitored one never appears in an answer."""
     return list(
         session.scalars(
-            select(Site).where(Site.owner_id == owner.id).order_by(Site.se_site_id)
+            select(Site)
+            .where(Site.owner_id == owner.id, Site.monitored.is_(True))
+            .order_by(Site.se_site_id)
         ).all()
     )
 

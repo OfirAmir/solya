@@ -134,6 +134,7 @@ def register_site(
         if site.owner_id != req.owner_id:  # M4: the caller also tells the admin
             log.warning("site %s reassigned from owner %s to owner %s",
                         info.site_id, site.owner_id, req.owner_id)
+            site.monitored = True  # the new owner has not chosen yet; plan and kW are kept
         site.owner_id = req.owner_id
         site.portal_name = info.name
         site.peak_power_kwp_reported = info.peak_power_kwp

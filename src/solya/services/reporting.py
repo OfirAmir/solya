@@ -63,14 +63,27 @@ DelaySend = Callable[[float, Callable[[], Awaitable[object]]], None]
 Outgoing = tuple[OutboundMessage, tuple[int, str] | None]
 
 
+def owner_chat(owner: Owner) -> str | None:
+    """The Telegram recipient for ``owner``, or None while they cannot be messaged:
+    a web sign-up with no linked chat yet, or an owner who blocked the bot."""
+    if owner.telegram_chat_id is None or not owner.active:
+        return None
+    return str(owner.telegram_chat_id)
+
+
 def _view(rec: FaultRecord) -> FaultView:
     return FaultView(rec.code, rec.serial, rec.first_seen, rec.source)
 
 
-def _owner_sites(session: Session, owner_id: int) -> list[Site]:
-    return list(
-        session.scalars(select(Site).where(Site.owner_id == owner_id).order_by(Site.se_site_id))
-    )
+def _owner_sites(session: Session, owner_id: int, monitored_only: bool = False) -> list[Site]:
+    stmt = select(Site).where(Site.owner_id == owner_id).order_by(Site.se_site_id)
+    if monitored_only:
+        stmt = stmt.where(Site.monitored.is_(True))
+    return list(session.scalars(stmt))
+
+
+def _skip_unlinked(what: str, owner_id: int) -> None:
+    log.info("skip_unlinked: %s for owner %s not sent (no linked chat)", what, owner_id)
 
 
 def _unnotified_open_faults(session: Session, site_id: int) -> list[FaultRecord]:
@@ -143,10 +156,11 @@ def build_owner_report(
 ) -> tuple[CardData, str] | None:
     """Card data and Hebrew text for an owner's evening report, from stored data only.
 
-    No network access. Returns None when the owner has no unpaused site.
+    No network access. Only monitored sites appear. Returns None when the owner has no
+    monitored, unpaused site.
     """
     owner = session.get(Owner, owner_id)
-    sites = _owner_sites(session, owner_id)
+    sites = _owner_sites(session, owner_id, monitored_only=True)
     shown = [site for site in sites if site.status != "paused"]
     if owner is None or not shown:
         return None
@@ -279,9 +293,12 @@ class Reporter:
             local_now = now.astimezone(tz)
 
             events = []
+            # An unmonitored site is only reached by a manual pull: store the data, but
+            # leave its faults and comm state as they are and tell nobody.
+            monitored = site.monitored
             detected = detect_faults(
                 bundle, list(site.expected_inverters or []), now, daylight, kind, stale_after
-            )
+            ) if monitored else None
             if detected is not None:  # R12: stale data never touches fault records
                 # A silent pull never closes faults: it could not send the follow-up, and
                 # nothing resends one later. The next notifying pull closes and announces it.
@@ -298,14 +315,19 @@ class Reporter:
                 lifetime_wh = bundle.lifetime.energy_wh if bundle.lifetime is not None else None
                 as_of = (bundle.site.last_update_time if bundle.site is not None else None) or bundle.pulled_at
                 persist_site_day(s, day, local_date, lifetime_wh, as_of, computed_at=now)
-                no_data = day.state == "no_data"
+                no_data = monitored and day.state == "no_data"
 
+            if not monitored:
+                return [], no_data
             # A silent pull leaves the transition to the service, which announces it.
             comm = self._comm_transition(site, bundle, now) if notify else None
 
-            if not notify or not owner.active:
+            chat = owner_chat(owner)
+            if not notify or chat is None:
+                if notify and owner.telegram_chat_id is None:
+                    _skip_unlinked(f"{kind} pull messages for site {site_id}", owner.id)
                 return [], no_data
-            chat, name = str(owner.telegram_chat_id), owner.display_name
+            name = owner.display_name
             fault_label = label if count > 1 else None
             out: list[Outgoing] = []
             # Every open, not-yet-notified fault: this pull's new ones and any whose
@@ -373,11 +395,14 @@ class Reporter:
             if owner is None or not owner.active:
                 log.info("evening report skipped for inactive or unknown owner %s", owner_id)
                 return
+            chat = owner_chat(owner)
+            if chat is None:
+                _skip_unlinked(f"evening report {local_date.isoformat()}", owner_id)
+                return
             built = build_owner_report(s, owner_id, local_date, now, self._settings, self._ray)
             if built is None:
                 return
             card, text = built
-            chat = str(owner.telegram_chat_id)
 
         try:
             png = render_card(card)
@@ -417,13 +442,16 @@ class Reporter:
             for rec in due_reminders(s, now, self._settings.fault_reminder_hours):
                 site = s.get(Site, rec.site_id)
                 owner = s.get(Owner, site.owner_id) if site is not None else None
-                if owner is None or not owner.active:
+                chat = owner_chat(owner) if owner is not None else None
+                if chat is None:
+                    if owner is not None and owner.telegram_chat_id is None:
+                        _skip_unlinked(f"reminder for fault {rec.id}", owner.id)
                     continue
                 text = he.fault_reminder(
                     owner.display_name, _view(rec), now.astimezone(ZoneInfo(site.tz))
                 )
                 msg = OutboundMessage(
-                    str(owner.telegram_chat_id), "fault", text, None,
+                    chat, "fault", text, None,
                     f"reminder:{rec.site_id}:{rec.key}",
                 )
                 outgoing.append((msg, (rec.id, "reminded_at")))
@@ -460,11 +488,14 @@ class Reporter:
                 return
             local_now = now.astimezone(ZoneInfo(site.tz))
             owner = s.get(Owner, site.owner_id)
-            if owner is not None and owner.active:
+            chat = owner_chat(owner) if owner is not None else None
+            if owner is not None and owner.telegram_chat_id is None:
+                _skip_unlinked(f"reauth link for site {site_id}", owner.id)
+            if chat is not None:
                 label = effective_label(site, len(_owner_sites(s, owner.id)))
                 url = create_connect_request(s, owner.id, now, self._settings)
                 owner_msg = OutboundMessage(
-                    str(owner.telegram_chat_id), "reply",
+                    chat, "reply",
                     he.reauth_link(owner.display_name, label, url, local_now), None,
                     f"reauth:{site_id}:{local_now.date().isoformat()}",
                 )
@@ -496,12 +527,19 @@ class Reporter:
         with session_scope(self._sf) as s:
             row = s.get(Site, site_id)
             owner = s.get(Owner, row.owner_id)
-            chat, owner_id, portal_name = str(owner.telegram_chat_id), owner.id, row.portal_name
+            chat, owner_id, portal_name = owner_chat(owner), owner.id, row.portal_name
+            unlinked = owner.telegram_chat_id is None
         if self.replan_owner is not None:
             try:
                 self.replan_owner(owner_id)  # tonight's pull and report for the new site
             except Exception:
                 log.exception("could not re-plan today's jobs for owner %s", owner_id)
+        if chat is None:
+            if unlinked:  # linking the chat later sends the welcome pair instead
+                _skip_unlinked(f"connect messages for site {site_id}", owner_id)
+            else:
+                log.info("connect messages for site %s skipped: owner %s inactive", site_id, owner_id)
+            return
         await self._send(
             OutboundMessage(chat, "welcome", he.site_connected(portal_name), None,
                             f"connected:{site_id}:{now.isoformat()}")

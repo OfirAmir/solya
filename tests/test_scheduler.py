@@ -17,7 +17,7 @@ NOW = datetime(2026, 11, 24, 10, 0, tzinfo=timezone.utc)
 def make_site(site_id, owner_id=1, lat=32.33, lon=34.89, **kw) -> Site:
     base = dict(
         se_site_id=site_id, owner_id=owner_id, portal_name=f"p{site_id}", tz=TZ,
-        lat=lat, lon=lon, status="active", commercial=False, check_times=None,
+        lat=lat, lon=lon, status="active", commercial=False, check_times=None, monitored=True,
         created_at=NOW,
     )
     base.update(kw)

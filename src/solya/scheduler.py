@@ -17,7 +17,7 @@ from sqlalchemy import select
 from solya.clock import Clock
 from solya.config import Settings
 from solya.db import SessionFactory, session_scope
-from solya.models import Site
+from solya.models import Owner, Site
 from solya.rules.comms import sun_times
 
 if TYPE_CHECKING:
@@ -59,16 +59,19 @@ def _check_time(local_date: date, hhmm: str, tz: str) -> datetime:
     return datetime.combine(local_date, time(hour, minute), ZoneInfo(tz)).astimezone(timezone.utc)
 
 
-def plan_day_jobs(sites: list[Site], local_date: date, settings: Settings) -> list[JobSpec]:
-    """Jobs for one local day. Only active sites are pulled; an owner gets a report job
-    when at least one of their sites is active, timed after their latest active sunset."""
+def plan_day_jobs(
+    sites: list[Site], local_date: date, settings: Settings, linked_owners: set[int] | None = None
+) -> list[JobSpec]:
+    """Jobs for one local day. Only monitored, active sites are pulled. An owner gets a
+    report job when at least one of their sites is, timed after the latest such sunset,
+    and only if they have a Telegram chat (``linked_owners``; None means every owner)."""
     pull_offset = timedelta(minutes=settings.evening_pull_offset_minutes)
     report_offset = timedelta(minutes=settings.report_offset_minutes)
     jobs: list[JobSpec] = []
     owner_sunsets: dict[int, list[datetime]] = defaultdict(list)
 
     for site in sites:
-        if site.status != "active":
+        if not site.monitored or site.status != "active":
             continue
         sunset = sunset_utc(site, local_date)
         owner_sunsets[site.owner_id].append(sunset)
@@ -78,6 +81,8 @@ def plan_day_jobs(sites: list[Site], local_date: date, settings: Settings) -> li
                 jobs.append(JobSpec(_check_time(local_date, hhmm, site.tz), "midday_check", site.se_site_id))
 
     for owner_id, sunsets in owner_sunsets.items():
+        if linked_owners is not None and owner_id not in linked_owners:
+            continue
         jobs.append(JobSpec(max(sunsets) + report_offset, "evening_report", owner_id))
 
     return sorted(jobs, key=lambda j: (j.run_at, j.kind, j.target))
@@ -129,7 +134,8 @@ class SchedulerService:
                 stmt = stmt.where(Site.owner_id == owner_id)
             sites = list(s.scalars(stmt).all())
             site_owner = {site.se_site_id: site.owner_id for site in sites}
-            specs = plan_day_jobs(sites, local_date, self._settings)
+            linked = set(s.scalars(select(Owner.id).where(Owner.telegram_chat_id.is_not(None))))
+            specs = plan_day_jobs(sites, local_date, self._settings, linked)
         reports_due = {
             spec.target for spec in specs
             if spec.kind == "evening_report" and spec.run_at > grace_cutoff

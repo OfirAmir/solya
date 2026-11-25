@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 
 from sqlalchemy import select
@@ -9,7 +10,11 @@ from solya.db import session_scope
 from solya.messaging.base import Blocked, Channel, Invalid, Ok, OutboundMessage, RetryAfter, SendResult
 from solya.models import OutboxEntry, Owner
 
+log = logging.getLogger(__name__)
+
 MAX_RETRY_SLEEP = 60.0
+# What str() makes of an unlinked owner's chat id; never a real recipient.
+_NO_RECIPIENT = {"", "None"}
 
 
 class Outbox:
@@ -25,6 +30,11 @@ class Outbox:
         msg: OutboundMessage,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> SendResult:
+        if msg.recipient in _NO_RECIPIENT:
+            # Defence in depth: callers skip owners with no chat before this point. Nothing
+            # is recorded, so the message can still go out once the chat is linked.
+            log.warning("skip_unlinked: %s has no recipient; not sent", msg.dedupe_key)
+            return Invalid("no recipient")
         with session_scope(self._sf) as s:
             entry = s.get(OutboxEntry, msg.dedupe_key)
             if entry is not None and entry.status == "sent":
