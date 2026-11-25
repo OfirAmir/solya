@@ -124,3 +124,4 @@ button, .button {
   .card { padding: 28px; }
   h1 { font-size: 40px; }
 }
+.row { display: flex; gap: 18px; flex-wrap: wrap; align-items: center; }

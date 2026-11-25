@@ -35,6 +35,24 @@ def test_redeem_once(db):
         assert ob.get_owner_by_chat(s, 33) is None
 
 
+def test_web_claimed_invite_not_redeemable_in_bot(db):
+    with db() as s:
+        tok = ob.create_invite(s, "admin", NOW)
+        web = ob.signup_web(s, tok, "דנה", "d@e.com", "0501234567", NOW)
+        assert ob.redeem_invite(s, tok, 44, "אבי", NOW) is None
+        assert ob.get_owner_by_chat(s, 44) is None
+        assert s.get(Invite, tok).owner_id == web.id
+
+
+def test_bot_redeem_claims_invite_conditionally(db):
+    with db() as s:
+        tok = ob.create_invite(s, "admin", NOW)
+        s.get(Invite, tok).used_at = NOW  # claimed elsewhere, e.g. a concurrent request
+        s.flush()
+        assert ob.redeem_invite(s, tok, 55, "דנה", NOW) is None
+        assert ob.get_owner_by_chat(s, 55) is None
+
+
 def test_connect_request_ttl(db, settings):
     with db() as s:
         owner = _owner(s)

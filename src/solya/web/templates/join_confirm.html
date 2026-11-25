@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block content %}
+    <section class="card">
+      <h2>להמשיך כ־{{ name }}?</h2>
+      <form class="row" action="/join/{{ invite | urlencode }}" method="post">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit">המשך</button>
+        <a href="/">זה לא אני</a>
+      </form>
+    </section>
+{% endblock %}

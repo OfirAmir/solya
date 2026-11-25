@@ -134,6 +134,10 @@ def test_signup_unknown_invite(tc, container):
     ("דנה", "dana.example.com", "0501234567"),      # no @
     ("דנה", "dana@example.com", "05012345"),        # 8 digits
     ("דנה", "dana@example.com", "050-abc-de"),
+    ("דנה", "dana@example.com", "٠٥٠١٢٣٤٥٦٧"),       # Arabic-Indic digits do not count
+    ("ד" * 101, "dana@example.com", "0501234567"),  # name over 100
+    ("דנה", "d@" + "e" * 253, "0501234567"),         # email over 254
+    ("דנה", "dana@example.com", "050-123-4567" + "-" * 21),  # phone over 32
 ])
 def test_signup_bad_fields(tc, container, name, email, phone):
     code = _invite(container)
@@ -155,6 +159,12 @@ def test_signup_phone_formats(tc, container):
         r = _signup(tc, _invite(container), phone=raw)
         assert r.status_code == 303, raw
     assert [o.phone for o in _owners(container)] == ["050-123 4567", "0501234567", "+972 50 123 4567"]
+
+
+def test_signup_field_caps_inclusive(tc, container):
+    r = _signup(tc, _invite(container), name="ד" * 100, email="d@" + "e" * 252,
+                phone="050-123-4567" + "-" * 20)
+    assert r.status_code == 303
 
 
 def test_signup_csrf_required(tc, container):
@@ -207,16 +217,68 @@ def test_join_unknown_invite_shows_bad_code(tc):
     assert BAD_INVITE in r.text
 
 
-def test_join_resume_before_link(tc, container):
+def _signed_up(tc, container) -> tuple[str, int]:
     code = _invite(container)
     first = _signup(tc, code)
     owner_id = container.sessions.read(first.cookies[SESSION_COOKIE])
     tc.cookies.clear()
+    return code, owner_id
+
+
+def test_join_get_confirms_without_signing_in(tc, container):
+    code, _ = _signed_up(tc, container)
     r = tc.get(f"/join/{code}")
+    assert r.status_code == 200
+    assert "להמשיך כ־דנה כהן?" in r.text
+    assert "זה לא אני" in r.text and 'href="/"' in r.text
+    assert f'action="/join/{code}" method="post"' in r.text
+    assert SESSION_COOKIE not in r.cookies
+    assert SESSION_COOKIE not in r.headers.get("set-cookie", "")
+
+
+def test_join_post_requires_csrf(tc, container):
+    code, _ = _signed_up(tc, container)
+    tc.get(f"/join/{code}")
+    for data in ({}, {"csrf": "forged"}):
+        r = tc.post(f"/join/{code}", data=data)
+        assert r.status_code == 403
+        assert SESSION_COOKIE not in r.cookies
+
+
+def test_join_resume_before_link(tc, container):
+    code, owner_id = _signed_up(tc, container)
+    csrf = _csrf(tc.get(f"/join/{code}").text)
+    r = tc.post(f"/join/{code}", data={"csrf": csrf})
     assert r.status_code == 303
     assert r.headers["location"] == "/connect-site"
     assert container.sessions.read(r.cookies[SESSION_COOKIE]) == owner_id
     assert len(_owners(container)) == 1
+
+
+def test_join_post_rate_limited(tc, container):
+    code, _ = _signed_up(tc, container)  # one sign-up already counted
+    csrf = _csrf(tc.get(f"/join/{code}").text)
+    for _ in range(9):
+        assert tc.post(f"/join/{code}", data={"csrf": csrf}).status_code == 303
+    assert tc.post(f"/join/{code}", data={"csrf": csrf}).status_code == 429
+
+
+def test_join_post_after_link_issues_no_session(tc, container):
+    code, owner_id = _signed_up(tc, container)
+    csrf = _csrf(tc.get(f"/join/{code}").text)
+    with session_scope(container.session_factory) as s:
+        s.get(Owner, owner_id).telegram_chat_id = 777
+    r = tc.post(f"/join/{code}", data={"csrf": csrf})
+    assert r.status_code == 200 and ALREADY in r.text
+    assert SESSION_COOKIE not in r.cookies
+
+
+def test_join_inactive_owner_not_resumable(tc, container):
+    code, owner_id = _signed_up(tc, container)
+    with session_scope(container.session_factory) as s:
+        s.get(Owner, owner_id).active = False
+    r = tc.get(f"/join/{code}")
+    assert BAD_INVITE in r.text and "להמשיך" not in r.text
 
 
 def test_join_after_link_shows_continue_in_telegram(tc, container):

@@ -37,8 +37,7 @@ def redeem_invite(
     existing = get_owner_by_chat(session, chat_id)
     if existing is not None:
         return existing
-    invite = session.get(Invite, token)
-    if invite is None or invite.used_at is not None:
+    if not _claim_invite(session, token, now):
         return None
     owner = Owner(
         display_name=first_name,
@@ -49,15 +48,37 @@ def redeem_invite(
     )
     session.add(owner)
     session.flush()
-    invite.used_at = now
-    invite.owner_id = owner.id
-    session.flush()
+    _attach_invite(session, token, owner.id)
     return owner
 
 
+def _claim_invite(session: Session, token: str, now: datetime) -> bool:
+    """Mark an unused invite used with one conditional UPDATE, so two concurrent
+    redemptions (web or bot) cannot both pass a read-then-write check."""
+    claimed = session.execute(
+        update(Invite)
+        .where(Invite.token == token, Invite.used_at.is_(None))
+        .values(used_at=now)
+    ).rowcount
+    return claimed == 1
+
+
+def _attach_invite(session: Session, token: str, owner_id: int) -> None:
+    session.execute(update(Invite).where(Invite.token == token).values(owner_id=owner_id))
+
+
+MAX_NAME, MAX_EMAIL, MAX_PHONE = 100, 254, 32
+
+
 def _valid_signup_fields(name: str, email: str, phone: str) -> bool:
-    """PR #1's rules: name of 2+ chars, an "@" in the email, 9+ digits in the phone."""
-    return len(name) >= 2 and "@" in email and sum(ch.isdigit() for ch in phone) >= 9
+    """PR #1's rules (name of 2+ chars, an "@" in the email, 9+ ASCII digits in the
+    phone) plus length caps."""
+    return (
+        2 <= len(name) <= MAX_NAME
+        and "@" in email and len(email) <= MAX_EMAIL
+        and len(phone) <= MAX_PHONE
+        and sum(ch in "0123456789" for ch in phone) >= 9
+    )
 
 
 def signup_web(
@@ -73,14 +94,7 @@ def signup_web(
     if not _valid_signup_fields(name, email, phone):
         raise ValueError("form")
     token = invite_token.strip()
-    # Claim the invite with one conditional UPDATE, so two concurrent submits of the
-    # same code cannot both pass a read-then-write check.
-    claimed = session.execute(
-        update(Invite)
-        .where(Invite.token == token, Invite.used_at.is_(None))
-        .values(used_at=now)
-    ).rowcount
-    if claimed != 1:
+    if not _claim_invite(session, token, now):
         return None
     owner = Owner(
         display_name=name,
@@ -95,17 +109,20 @@ def signup_web(
     )
     session.add(owner)
     session.flush()
-    session.execute(update(Invite).where(Invite.token == token).values(owner_id=owner.id))
+    _attach_invite(session, token, owner.id)
     return owner
 
 
 def web_owner_for_invite(session: Session, invite_token: str) -> Owner | None:
-    """The web Owner that redeemed this invite, or None (unknown, unused, or a bot sign-up)."""
+    """The active web Owner that redeemed this invite, or None (unknown, unused, a bot
+    sign-up, or a deactivated owner)."""
     invite = session.get(Invite, invite_token)
     if invite is None or invite.owner_id is None:
         return None
     owner = session.get(Owner, invite.owner_id)
-    return owner if owner is not None and owner.signup_source == "web" else None
+    if owner is None or owner.signup_source != "web" or not owner.active:
+        return None
+    return owner
 
 
 def create_connect_request(

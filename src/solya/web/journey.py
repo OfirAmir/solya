@@ -112,26 +112,61 @@ async def landing(request: Request):
     return _landing(request)
 
 
-@router.get("/join/{invite}")
-async def join(invite: str, request: Request):
-    """Pre-fill the code. An invite already redeemed by a web owner who has not linked
-    Telegram reopens that owner's session; after linking it only says to continue in
-    Telegram (the deep link is not shown again)."""
+def _join_state(request: Request, invite: str) -> tuple[str, int | None, str]:
+    """("unknown" | "unused" | "not_resumable" | "linked" | "resumable", owner_id, name)."""
     c = _container(request)
     with session_scope(c.session_factory) as s:
         inv = s.get(Invite, invite)
-        used = inv is not None and inv.used_at is not None
-        owner = onboarding.web_owner_for_invite(s, invite) if used else None
-        owner_id = owner.id if owner is not None else None
-        linked = owner is not None and owner.telegram_chat_id is not None
-    if inv is None:
-        return _landing(request, error=BAD_INVITE)
-    if not used:
+        if inv is None:
+            return "unknown", None, ""
+        if inv.used_at is None:
+            return "unused", None, ""
+        owner = onboarding.web_owner_for_invite(s, invite)
+        if owner is None:  # redeemed in the bot, or deactivated
+            return "not_resumable", None, ""
+        if owner.telegram_chat_id is not None:
+            return "linked", owner.id, owner.display_name
+        return "resumable", owner.id, owner.display_name
+
+
+def _join_other(request: Request, invite: str, state: str):
+    if state == "unused":
         return _landing(request, code=invite)
-    if owner_id is None:  # redeemed in the bot
-        return _landing(request, error=BAD_INVITE)
-    if linked:
+    if state == "linked":
         return _message(request, ALREADY_LINKED, bot_link=True)
+    return _landing(request, error=BAD_INVITE)
+
+
+@router.get("/join/{invite}")
+async def join(invite: str, request: Request):
+    """Pre-fill the code. An invite already redeemed by a web owner who has not linked
+    Telegram shows a confirmation; the session is issued only by the CSRF-checked POST
+    (a GET never signs anyone in, so a shared link cannot log a victim in as someone
+    else). After linking it only says to continue in Telegram (no deep link)."""
+    state, _, name = _join_state(request, invite)
+    if state != "resumable":
+        return _join_other(request, invite, state)
+    c = _container(request)
+    pre = request.cookies.get(PRE_COOKIE) or secrets.token_urlsafe(24)
+    resp = templates.TemplateResponse(
+        request, "join_confirm.html",
+        {"name": name, "invite": invite, "csrf": c.sessions.csrf_token(pre)},
+    )
+    if request.cookies.get(PRE_COOKIE) != pre:
+        resp.set_cookie(PRE_COOKIE, pre, **cookie_params(c.settings.public_base_url, PRE_MAX_AGE))
+    return resp
+
+
+@router.post("/join/{invite}")
+async def join_confirm(invite: str, request: Request, csrf: str = Form("")):
+    c = _container(request)
+    if not _signup_limiter(request).hit(client_ip(request)):
+        return _message(request, TOO_MANY, 429)
+    if not c.sessions.check_csrf(request.cookies.get(PRE_COOKIE), csrf):
+        return _message(request, FORM_EXPIRED, 403)
+    state, owner_id, _ = _join_state(request, invite)
+    if state != "resumable":
+        return _join_other(request, invite, state)
     return _signed_in(request, owner_id)
 
 
