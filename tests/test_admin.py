@@ -1,5 +1,5 @@
 import re
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -237,8 +237,6 @@ def test_admin_states_low_plan_limits(tc, container):
 
 def test_admin_ai_tokens_use_the_budget_month(tc, container):
     """M8: the month starts at midnight Israel time, as the AI budget's does, not UTC."""
-    from datetime import datetime, timezone
-
     _, b = _seed(container)
     now = datetime(2026, 12, 1, 10, 0, tzinfo=timezone.utc)
     container.clock.advance(now - container.clock.now())

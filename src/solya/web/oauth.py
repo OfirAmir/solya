@@ -57,7 +57,7 @@ def _is_unlinked_web_owner(request: Request, owner_id: int | None) -> bool:
         return False
     with session_scope(request.app.state.container.session_factory) as s:
         owner = s.get(Owner, owner_id)
-        return (owner is not None and owner.active and owner.signup_source == "web"
+        return (owner is not None and owner.signup_source == "web"
                 and owner.telegram_chat_id is None)
 
 
