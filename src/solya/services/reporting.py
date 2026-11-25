@@ -212,7 +212,8 @@ class Reporter:
     async def manual_pull(self, site_id: int, kind: str, notify: bool = False) -> PullBundle | None:
         """R25: the admin ``pull`` command. The same pipeline as the scheduled pulls
         (DailyMetric, fault records); with ``notify`` False nothing is sent, no retry is
-        scheduled and the comm state is left for the service to change and announce.
+        scheduled, no fault is closed and the comm state is left for the service to
+        change and announce.
         Returns None when the pull was skipped (unknown or inactive site, auth, budget)."""
         return await self._pull_and_process(site_id, kind, None, notify=notify)
 
@@ -282,7 +283,11 @@ class Reporter:
                 bundle, list(site.expected_inverters or []), now, daylight, kind, stale_after
             )
             if detected is not None:  # R12: stale data never touches fault records
-                data_complete = "alerts" not in bundle.errors and "inverters" not in bundle.errors
+                # A silent pull never closes faults: it could not send the follow-up, and
+                # nothing resends one later. The next notifying pull closes and announces it.
+                data_complete = (
+                    notify and "alerts" not in bundle.errors and "inverters" not in bundle.errors
+                )
                 events = sync_faults(s, site_id, detected, now, data_complete)
 
             if kind == "evening":

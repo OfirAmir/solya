@@ -793,3 +793,27 @@ async def test_zero_production_closes_silently(h, load_fixture):
         (rec,) = s.scalars(select(FaultRecord)).all()
         assert rec.closed_at is not None and rec.closed_notified_at is None
     assert [m for m in h.channel.sent if m.dedupe_key.startswith("closed:")] == []
+
+
+async def test_silent_pull_leaves_notified_fault_open(h, load_fixture):
+    """A silent `solya pull` must not close a notified fault: closing it there would drop
+    the spec §5.5 follow-up for good. The next notifying pull closes it and says so."""
+    with respx.mock:
+        mock_site(load_fixture, HOME, inverters=home_status(("13:00", "LOCKED_GRID")))
+        await h.reporter.evening_pull(HOME)
+    assert len(h.sent("fault")) == 1
+    with respx.mock:
+        mock_site(load_fixture, HOME, inverters=home_status(("13:00", "MPPT")))
+        await h.reporter.manual_pull(HOME, "evening", notify=False)
+    with session_scope(h.db) as s:
+        (rec,) = s.scalars(select(FaultRecord)).all()
+        assert rec.notified_at is not None and rec.closed_at is None
+    assert [m for m in h.channel.sent if m.dedupe_key.startswith("closed:")] == []
+    with respx.mock:
+        mock_site(load_fixture, HOME, inverters=home_status(("13:00", "MPPT")))
+        await h.reporter.evening_pull(HOME)
+    with session_scope(h.db) as s:
+        (rec,) = s.scalars(select(FaultRecord)).all()
+        assert rec.closed_at is not None and rec.closed_notified_at is not None
+    (closed,) = [m for m in h.channel.sent if m.dedupe_key.startswith("closed:")]
+    assert "7F11A2B3-C4" in closed.text
