@@ -300,3 +300,61 @@ def test_reassign_resets_monitored(db, settings):
 def _req(s, settings, owner):
     url = ob.create_connect_request(s, owner.id, NOW, settings)
     return s.get(ConnectRequest, url.rsplit("/", 1)[1])
+
+
+# ------------------------------------- state from while unlinked, sent at link (M6, M7)
+
+
+def _link_dana(db):
+    with session_scope(db) as s:
+        s.get(Owner, 2).telegram_chat_id = LATER_CHAT
+
+
+async def test_link_sends_reauth_link_missed_while_unlinked(h, settings):
+    settings.admin_chat_ids = [999]
+    with session_scope(h.db) as s:
+        s.get(Site, HOME).status = "reauth_needed"
+    await h.reporter.on_reauth_needed(HOME)  # unlinked: only the admins hear of it
+    _link_dana(h.db)
+    await h.reporter.on_owner_linked(2)
+    await h.reporter.on_owner_linked(2)  # a retried link sends nothing twice
+
+    to_dana = [m for m in h.channel.sent if m.recipient == str(LATER_CHAT)]
+    assert [m.dedupe_key for m in to_dana] == [
+        "welcome1:2", "monitored:2", f"reauth:{HOME}:2026-11-24",
+    ]
+    with session_scope(h.db) as s:
+        req = s.scalars(select(ConnectRequest)).one()
+        assert req.owner_id == 2
+        assert f"/connect/{req.token}" in to_dana[-1].text
+    assert [m.recipient for m in h.channel.sent].count("999") == 1  # admins told once
+
+
+async def test_link_sends_comm_loss_started_while_unlinked(h):
+    since = NOW - timedelta(hours=3)
+    with session_scope(h.db) as s:
+        site = s.get(Site, HOME)
+        site.comm_state, site.comm_since = "loss", since
+    _link_dana(h.db)
+    await h.reporter.on_owner_linked(2)
+    await h.reporter.on_owner_linked(2)
+
+    to_dana = [m for m in h.channel.sent if m.recipient == str(LATER_CHAT)]
+    assert [m.dedupe_key for m in to_dana] == [
+        "welcome1:2", "monitored:2", f"comm:{HOME}:{since.isoformat()}",
+    ]
+    assert to_dana[-1].kind == "comm_loss"
+    assert "אין תקשורת עם המערכת מאז" in to_dana[-1].text and "14:05" in to_dana[-1].text
+
+
+async def test_link_skips_comm_loss_of_unmonitored_site(h):
+    with session_scope(h.db) as s:
+        site = s.get(Site, HOME)
+        site.comm_state, site.comm_since = "loss", NOW - timedelta(hours=3)
+        s.add(_site(HOME + 1, 2, "מחסן", monitored=False, comm_state="loss",
+                    comm_since=NOW - timedelta(hours=3)))
+    _link_dana(h.db)
+    await h.reporter.on_owner_linked(2)
+    keys = [m.dedupe_key for m in h.channel.sent]
+    assert f"comm:{HOME}:{(NOW - timedelta(hours=3)).isoformat()}" in keys
+    assert not any(k.startswith(f"comm:{HOME + 1}:") for k in keys)

@@ -22,7 +22,7 @@ from solya.db import SessionFactory, session_scope
 from solya.ingest import PullBundle, pull_site
 from solya.messaging.base import Channel, Ok, OutboundMessage
 from solya.messaging.outbox import Outbox
-from solya.models import DailyMetric, FaultRecord, Owner, Site, SiteToken
+from solya.models import DailyMetric, FaultRecord, OutboxEntry, Owner, Site, SiteToken
 from solya.render.card import CardData, CardRow, render_card
 from solya.rules.comms import is_stale
 from solya.rules.daily import FaultView, SiteDay, compute_site_day, effective_label, persist_site_day
@@ -512,13 +512,8 @@ class Reporter:
             if owner is not None and owner.telegram_chat_id is None:
                 _skip_unlinked(f"reauth link for site {site_id}", owner.id)
             if chat is not None:
-                label = effective_label(site, len(_owner_sites(s, owner.id, monitored_only=True)))
-                url = create_connect_request(s, owner.id, now, self._settings)
-                owner_msg = OutboundMessage(
-                    chat, "reply",
-                    he.reauth_link(owner.display_name, label, url, local_now), None,
-                    f"reauth:{site_id}:{local_now.date().isoformat()}",
-                )
+                count = len(_owner_sites(s, owner.id, monitored_only=True))
+                owner_msg = self._reauth_message(s, site, owner, chat, count, now)
         if owner_msg is not None:
             await self._send(owner_msg)
         for chat_id in self._settings.admin_chat_ids:
@@ -528,6 +523,44 @@ class Reporter:
                     f"admin_reauth:{site_id}:{local_now.date().isoformat()}:{chat_id}",
                 )
             )
+
+    @staticmethod
+    def _reauth_key(site: Site, now: datetime) -> str:
+        return f"reauth:{site.se_site_id}:{now.astimezone(ZoneInfo(site.tz)).date().isoformat()}"
+
+    def _reauth_message(
+        self, s: Session, site: Site, owner: Owner, chat: str, monitored_count: int, now: datetime
+    ) -> OutboundMessage:
+        """A fresh connect link for ``site``; one per site per local day."""
+        url = create_connect_request(s, owner.id, now, self._settings)
+        return OutboundMessage(
+            chat, "reply",
+            he.reauth_link(owner.display_name, effective_label(site, monitored_count), url,
+                           now.astimezone(ZoneInfo(site.tz))), None,
+            self._reauth_key(site, now),
+        )
+
+    def _missed_while_unlinked(
+        self, s: Session, owner: Owner, chat: str, monitored_count: int, now: datetime
+    ) -> list[OutboundMessage]:
+        """M6/M7: a reauth link or a comm-loss alert that could not be sent while the owner
+        had no chat. Same dedupe keys as the live paths, so nothing is sent twice."""
+        out = []
+        for site in _owner_sites(s, owner.id):
+            if site.status == "reauth_needed":
+                sent = s.get(OutboxEntry, self._reauth_key(site, now))
+                if sent is not None and sent.status == "sent":
+                    continue  # no second, unused connect link for a retried link
+                out.append(self._reauth_message(s, site, owner, chat, monitored_count, now))
+            elif site.monitored and site.comm_state == "loss" and site.comm_since is not None:
+                tz = ZoneInfo(site.tz)
+                out.append(OutboundMessage(
+                    chat, "comm_loss",
+                    he.comm_loss_alert(owner.display_name, effective_label(site, monitored_count),
+                                       site.comm_since.astimezone(tz), now.astimezone(tz)),
+                    None, f"comm:{site.se_site_id}:{site.comm_since.isoformat()}",
+                ))
+        return out
 
     async def on_site_reassigned(self, site_id: int, old_owner: int, new_owner: int) -> None:
         """M4: tell the admins that a connect moved a site from one owner to another."""
@@ -572,8 +605,11 @@ class Reporter:
 
     async def on_owner_linked(self, owner_id: int) -> None:
         """A web sign-up just linked its Telegram chat: welcome pair plus the monitored
-        count. Dedupe keys make a retried /start a no-op. Unnotified open faults are
-        left to the next pull's normal path (spec 5.6.1)."""
+        count, then any reauth link or comm-loss alert missed while unlinked. Dedupe keys
+        make a retried /start a no-op. Unnotified open faults are left to the next pull's
+        normal path (spec 5.6.1)."""
+        now = self._clock.now()
+        missed: list[OutboundMessage] = []
         with session_scope(self._sf) as s:
             owner = s.get(Owner, owner_id)
             chat = owner_chat(owner) if owner is not None else None
@@ -582,6 +618,8 @@ class Reporter:
                     Site.owner_id == owner_id, Site.monitored.is_(True)))
                 if chat is not None else 0
             )
+            if chat is not None:
+                missed = self._missed_while_unlinked(s, owner, chat, monitored, now)
         if chat is None:
             return
         await self._send(OutboundMessage(chat, "welcome", he.WELCOME_1, None, f"welcome1:{owner_id}"))
@@ -590,6 +628,8 @@ class Reporter:
         if monitored:
             await self._send(OutboundMessage(
                 chat, "welcome", he.sites_monitored(monitored), None, f"monitored:{owner_id}"))
+        for msg in missed:
+            await self._send(msg)
 
     # -------------------------------------------------------------- delivery
 
