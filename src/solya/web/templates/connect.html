@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+    <section class="card">
+      <h1>תודה {{ first_name }}.</h1>
+      <p>השלב הבא הוא אישור קריאה בלבד של בעל המערכת ב-SolarEdge. אישור אחד לכל מערכת. סוליה שומרת אסימון מוצפן, ולא מבקשת סיסמה לפורטל.</p>
+      <form class="row" action="/connect-site" method="post">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit">חיבור ל-SolarEdge</button>
+        {% if has_sites %}<a href="/sites">חזרה לבחירת המערכות</a>{% endif %}
+      </form>
+      <p class="note">אחרי האישור בוחרים אילו מערכות לעקוב.</p>
+    </section>
+{% endblock %}

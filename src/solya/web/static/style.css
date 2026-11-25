@@ -125,3 +125,18 @@ button, .button {
   h1 { font-size: 40px; }
 }
 .row { display: flex; gap: 18px; flex-wrap: wrap; align-items: center; }
+
+/* site picker rows (PR #1) */
+.site {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink);
+  font-size: 16px;
+}
+.site input[type="checkbox"] { width: 20px; height: 20px; margin: 3px 0 0; flex: none; }
+.site > span { display: grid; gap: 2px; }
+.price { font-size: 14px; }
+.total { font-size: 18px; font-weight: 700; }

@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+    <section class="card">
+      <h1>תשלום</h1>
+      {% if amount %}
+      <p>סכום לתצוגה: <bdi>{{ amount }}</bdi> לחודש.</p>
+      {% if estimate_label %}<p class="note">{{ estimate_label }}</p>{% endif %}
+      {% else %}
+      <p>{{ unknown_price }}</p>
+      {% endif %}
+      <p>טרם שולם. ספק הסליקה טרם נבחר, ולא בוצע חיוב ולא הופעל מנוי.</p>
+      <p class="note">{{ vat_note }} כשיוחלט על ספק, העמוד הזה יוחלף בקופה מתארחת.</p>
+      <p><a class="button" href="/ready">המשך לטלגרם</a></p>
+    </section>
+{% endblock %}

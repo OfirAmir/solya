@@ -1,13 +1,17 @@
 import re
+from datetime import timedelta
 
+import httpx
 import pytest
+import respx
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 from solya.app import build_container, create_app
 from solya.db import session_scope
-from solya.models import Invite, Owner
-from solya.services import onboarding
+from solya.models import ConnectRequest, Invite, Owner, Payment, Site
+from solya.pricing import ESTIMATE_LABEL, VAT_NOTE
+from solya.services import onboarding, payments
 from solya.web.journey import PRE_COOKIE
 from solya.web.security import SESSION_COOKIE
 
@@ -24,7 +28,11 @@ HTTPS = "https://testserver"
 @pytest.fixture
 def container(settings, clock, tmp_path):
     settings.database_url = f"sqlite:///{tmp_path}/solya.db"
-    return build_container(settings, clock=clock, channel=FakeChannel())
+
+    async def sleep(seconds):  # SolarEdge request spacing advances the fixed clock
+        clock.advance(timedelta(seconds=seconds))
+
+    return build_container(settings, clock=clock, channel=FakeChannel(), budget_sleep=sleep)
 
 
 @pytest.fixture
@@ -329,3 +337,269 @@ def test_signup_web_service(db, clock):
     with session_scope(db) as s:
         assert onboarding.signup_web(s, code, "דנה", "a@b", "0501234567", now) is None
         assert s.scalar(select(func.count()).select_from(Owner)) == 1
+
+
+# --- connect, site picker, price, payment stub, ready (Task 6) -----------------------------
+
+FARM_ID = 3033498  # portal peakPower 65.52, no override: 49.97 + 15.52 = 65.49 estimate
+CODE = "SECRET-AUTH-CODE-123"
+CONNECTED = "המערכת חוברה בהצלחה. אפשר לחזור לטלגרם."
+PICK_ONE = "יש לבחור לפחות מערכת אחת"
+VIA_BOT = "השינויים נעשים עכשיו דרך סול בטלגרם"
+STUB = "טרם שולם. ספק הסליקה טרם נבחר, ולא בוצע חיוב ולא הופעל מנוי."
+
+
+def _mock_se(site_json):
+    respx.post("https://monitoringapi.solaredge.com/v2/oauth2/token").mock(
+        return_value=httpx.Response(
+            200, json={"access_token": "ACCESS-T", "refresh_token": "REFRESH-T", "expires_in": 3600}
+        )
+    )
+    respx.get(f"https://monitoringapi.solaredge.com/v2/sites/{site_json['siteId']}").mock(
+        return_value=httpx.Response(200, json=site_json)
+    )
+
+
+def _web_owner(tc, container) -> int:
+    """Sign up on `tc` (which keeps the session cookie) and return the owner id."""
+    r = _signup(tc, _invite(container))
+    assert r.status_code == 303
+    return container.sessions.read(r.cookies[SESSION_COOKIE])
+
+
+def _add_site(container, owner_id, site_id, name="בית", kw=26.55, monitored=True) -> None:
+    with session_scope(container.session_factory) as s:
+        s.add(Site(se_site_id=site_id, owner_id=owner_id, portal_name=name, tz="Asia/Jerusalem",
+                   peak_power_kwp_reported=kw, monitored=monitored,
+                   created_at=container.clock.now()))
+
+
+def _link(container, owner_id, chat=777) -> None:
+    with session_scope(container.session_factory) as s:
+        s.get(Owner, owner_id).telegram_chat_id = chat
+
+
+def _owner(container, owner_id) -> Owner:
+    with session_scope(container.session_factory) as s:
+        owner = s.get(Owner, owner_id)
+        s.expunge(owner)
+        return owner
+
+
+def _monitored(container) -> dict[int, bool]:
+    with session_scope(container.session_factory) as s:
+        return {site.se_site_id: site.monitored for site in s.scalars(select(Site))}
+
+
+@respx.mock
+def test_full_journey_to_ready(tc, container, load_fixture):
+    owner_id = _web_owner(tc, container)
+    r = tc.get("/connect-site")
+    assert r.status_code == 200
+    assert '<html dir="rtl" lang="he">' in r.text
+    assert "חיבור ל-SolarEdge" in r.text
+    r = tc.post("/connect-site", data={"csrf": _csrf(r.text)})
+    assert r.status_code == 303
+    location = r.headers["location"]
+    assert re.fullmatch(r"/connect/[\w-]+", location)
+    token = location.rsplit("/", 1)[1]
+    r = tc.get(location)
+    assert r.status_code == 302 and "solaredge" in r.headers["location"]
+    with session_scope(container.session_factory) as s:
+        req = s.get(ConnectRequest, token)
+        assert req.owner_id == owner_id
+        nonce = req.nonce
+
+    _mock_se(load_fixture("solaredge/site_farm.json"))
+    r = tc.get("/oauth/callback", params={"code": CODE, "site_id": FARM_ID, "state": nonce})
+    assert r.status_code == 303
+    assert r.headers["location"] == "/sites"
+    assert _owner(container, owner_id).subscription_status == "connected"
+
+    r = tc.get("/sites")
+    assert r.status_code == 200
+    assert str(FARM_ID) in r.text and "אורן סופר" in r.text
+    assert "65.49 ₪" in r.text
+    assert 'href="/connect-site"' in r.text
+    r = tc.post("/sites", data={"site": str(FARM_ID), "csrf": _csrf(r.text)})
+    assert r.status_code == 303 and r.headers["location"] == "/price"
+
+    r = tc.get("/price")
+    assert r.status_code == 200
+    assert "65.49 ₪" in r.text and ESTIMATE_LABEL in r.text and VAT_NOTE in r.text
+    r = tc.post("/pay", data={"csrf": _csrf(r.text)})
+    assert r.status_code == 303
+    pay_id = r.headers["location"].removeprefix("/pay/")
+    with session_scope(container.session_factory) as s:
+        payment = s.get(Payment, pay_id)
+        assert payment.owner_id == owner_id
+        assert payment.amount_agorot == 6549 and payment.amount_is_estimate is True
+        assert payment.provider == "stub" and payment.status == "stub_pending"
+    assert _owner(container, owner_id).subscription_status == "pending_payment"
+
+    r = tc.get(f"/pay/{pay_id}")
+    assert r.status_code == 200
+    assert "65.49 ₪" in r.text and STUB in r.text and ESTIMATE_LABEL in r.text
+    assert 'href="/ready"' in r.text
+
+    r = tc.get("/ready")
+    assert r.status_code == 200
+    assert "המערכות נשמרו." in r.text
+    link_token = _owner(container, owner_id).link_token
+    assert f'href="https://t.me/solya_test_bot?start={link_token}"' in r.text
+    assert "ACCESS-T" not in r.text and "REFRESH-T" not in r.text
+
+
+def test_pay_other_owner_404(tc, app, container):
+    _web_owner(tc, container)
+    with TestClient(app, base_url=HTTPS, follow_redirects=False) as other:
+        other_id = _web_owner(other, container)
+        with session_scope(container.session_factory) as s:
+            theirs = payments.create_stub_checkout(s, other_id, 4997, False, "x",
+                                                   container.clock.now()).id
+        assert other.get(f"/pay/{theirs}").status_code == 200
+    r = tc.get(f"/pay/{theirs}")
+    assert r.status_code == 404
+    assert "49.97" not in r.text
+    assert tc.get("/pay/no-such-payment").status_code == 404
+
+
+def test_sites_lists_only_own(tc, app, container):
+    mine = _web_owner(tc, container)
+    with TestClient(app, base_url=HTTPS, follow_redirects=False) as other:
+        theirs = _web_owner(other, container)
+    _add_site(container, mine, 111111, name="הבית שלי")
+    _add_site(container, theirs, 222222, name="של מישהו אחר")
+    r = tc.get("/sites")
+    assert r.status_code == 200
+    assert "111111" in r.text and "הבית שלי" in r.text
+    assert "222222" not in r.text and "של מישהו אחר" not in r.text
+    # ticking another owner's site id does not count and does not touch it
+    with session_scope(container.session_factory) as s:
+        s.get(Site, 222222).monitored = False
+    r = tc.post("/sites", data={"site": ["222222"], "csrf": _csrf(r.text)})
+    assert r.status_code == 400 and PICK_ONE in r.text
+    assert _monitored(container) == {111111: True, 222222: False}
+    r = tc.post("/sites", data={"site": ["111111", "222222"], "csrf": _csrf(r.text)})
+    assert r.status_code == 303
+    assert _monitored(container) == {111111: True, 222222: False}
+
+
+def test_sites_requires_one(tc, container):
+    owner_id = _web_owner(tc, container)
+    _add_site(container, owner_id, 111111)
+    _add_site(container, owner_id, 111112)
+    csrf = _csrf(tc.get("/sites").text)
+    r = tc.post("/sites", data={"csrf": csrf})
+    assert r.status_code == 400
+    assert PICK_ONE in r.text and "111111" in r.text
+    assert _monitored(container) == {111111: True, 111112: True}
+    r = tc.post("/sites", data={"site": "111112", "csrf": csrf})
+    assert r.status_code == 303 and r.headers["location"] == "/price"
+    assert _monitored(container) == {111111: False, 111112: True}
+    r = tc.get("/price")
+    assert "49.97 ₪" in r.text  # only the monitored site is priced
+
+
+def test_sites_after_link_409(tc, container):
+    owner_id = _web_owner(tc, container)
+    _add_site(container, owner_id, 111111)
+    csrf = _csrf(tc.get("/connect-site").text)
+    _link(container, owner_id)
+    r = tc.post("/sites", data={"site": "111111", "csrf": csrf})
+    assert r.status_code == 409
+    assert VIA_BOT in r.text
+
+
+def test_ready_after_link_shows_continue_in_telegram(tc, container):
+    owner_id = _web_owner(tc, container)
+    link_token = _owner(container, owner_id).link_token
+    _link(container, owner_id)
+    r = tc.get("/ready")
+    assert r.status_code == 200
+    assert ALREADY in r.text
+    assert link_token not in r.text and "start=" not in r.text
+
+
+def test_price_unknown_kw_still_allows_stub(tc, container):
+    owner_id = _web_owner(tc, container)
+    _add_site(container, owner_id, 111111, kw=None)
+    r = tc.get("/price")
+    assert "המחיר יחושב כשקילוואט מותקן שמור אצלנו." in r.text
+    r = tc.post("/pay", data={"csrf": _csrf(r.text)})
+    assert r.status_code == 303
+    with session_scope(container.session_factory) as s:
+        [payment] = s.scalars(select(Payment))
+        assert payment.amount_agorot is None
+    assert "המחיר יחושב" in tc.get(r.headers["location"]).text
+
+
+def test_price_without_monitored_sites_goes_to_picker(tc, container):
+    owner_id = _web_owner(tc, container)
+    r = tc.get("/price")
+    assert r.status_code == 303 and r.headers["location"] == "/sites"
+    _add_site(container, owner_id, 111111, monitored=False)
+    csrf = _csrf(tc.get("/sites").text)
+    r = tc.post("/pay", data={"csrf": csrf})
+    assert r.status_code == 303 and r.headers["location"] == "/sites"
+    with session_scope(container.session_factory) as s:
+        assert s.scalar(select(func.count()).select_from(Payment)) == 0
+
+
+def test_journey_posts_require_csrf(tc, container):
+    owner_id = _web_owner(tc, container)
+    _add_site(container, owner_id, 111111)
+    for path, data in [("/connect-site", {}), ("/sites", {"site": "111111"}), ("/pay", {})]:
+        for extra in ({}, {"csrf": "forged"}):
+            r = tc.post(path, data={**data, **extra})
+            assert r.status_code == 403, path
+    # the pre-session token from the landing page is not the session token
+    tc.cookies.delete(PRE_COOKIE)
+    pre_token = _csrf(tc.get("/").text)
+    assert tc.post("/pay", data={"csrf": pre_token}).status_code == 403
+    with session_scope(container.session_factory) as s:
+        assert s.scalar(select(func.count()).select_from(Payment)) == 0
+        assert s.scalar(select(func.count()).select_from(ConnectRequest)) == 0
+
+
+def test_journey_pages_redirect_without_session(tc, container):
+    gets = ["/connect-site", "/sites", "/price", "/pay/anything", "/ready"]
+    posts = ["/connect-site", "/sites", "/pay"]
+    for cookie in (None, "forged-session"):
+        tc.cookies.clear()
+        if cookie:
+            tc.cookies.set(SESSION_COOKIE, cookie)
+        for path in gets:
+            r = tc.get(path)
+            assert (r.status_code, r.headers.get("location")) == (303, "/"), path
+        for path in posts:
+            r = tc.post(path, data={"csrf": "x"})
+            assert (r.status_code, r.headers.get("location")) == (303, "/"), path
+    # a valid session for an owner who is no longer active also goes back to /
+    owner_id = _web_owner(tc, container)
+    with session_scope(container.session_factory) as s:
+        s.get(Owner, owner_id).active = False
+    assert tc.get("/sites").headers.get("location") == "/"
+
+
+@respx.mock
+def test_bot_owner_callback_unchanged(tc, container, load_fixture):
+    _mock_se(load_fixture("solaredge/site_farm.json"))
+    with session_scope(container.session_factory) as s:
+        bot_owner = Owner(display_name="דנה", telegram_chat_id=555, created_at=container.clock.now())
+        s.add(bot_owner)
+        s.flush()
+        web_linked = onboarding.signup_web(s, onboarding.create_invite(s, "admin", container.clock.now()),
+                                           "רון", "r@e.com", "0501234567", container.clock.now())
+        web_linked.telegram_chat_id = 556
+        owners = [bot_owner.id, web_linked.id]
+    for owner_id in owners:
+        with session_scope(container.session_factory) as s:
+            token = onboarding.create_connect_request(
+                s, owner_id, container.clock.now(), container.settings).rsplit("/", 1)[1]
+            nonce = s.get(ConnectRequest, token).nonce
+        r = tc.get("/oauth/callback", params={"code": CODE, "site_id": FARM_ID, "state": nonce})
+        assert r.status_code == 200, owner_id
+        assert CONNECTED in r.text
+    assert _owner(container, owners[0]).subscription_status == "active"
+    assert _owner(container, owners[1]).subscription_status == "lead"

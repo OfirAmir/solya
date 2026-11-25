@@ -1,22 +1,28 @@
-"""Customer web journey: the invite-gated landing page, /join/<invite> and sign-up.
+"""Customer web journey: the invite-gated landing page, /join/<invite> and sign-up, then
+connect, site picker, price, payment stub and the Telegram hand-off.
 
 Pages are server-rendered Jinja templates (autoescaped) with no JavaScript. Every form
 carries a CSRF token: before sign-up it is bound to the random pre-session cookie
-`solya_pre`, afterwards to the signed session cookie."""
+`solya_pre`, afterwards to the signed session cookie. Session pages without a valid
+session (or whose owner is no longer active) redirect with 303 to /."""
 from __future__ import annotations
 
 import secrets
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import jinja2
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import RedirectResponse
+from sqlalchemy import select
 from fastapi.templating import Jinja2Templates
 
 from solya.db import session_scope
-from solya.models import Invite
-from solya.pricing import VAT_NOTE
-from solya.services import onboarding
+from solya.models import Invite, Owner, Payment, Site
+from solya.pricing import (
+    ESTIMATE_LABEL, UNKNOWN_PRICE, VAT_NOTE, describe_price, price_site, price_total,
+)
+from solya.services import onboarding, payments
 from solya.web.security import (
     SESSION_COOKIE, SESSION_MAX_AGE, RateLimiter, client_ip, cookie_params,
 )
@@ -43,6 +49,10 @@ BAD_FIELDS = "נא למלא שם, אימייל וטלפון תקינים"
 ALREADY_LINKED = "כבר נרשמת, המשך בטלגרם"
 FORM_EXPIRED = "תוקף הטופס פג. נא לנסות שוב."
 TOO_MANY = "יותר מדי ניסיונות. נא לנסות שוב בעוד שעה."
+PICK_ONE = "יש לבחור לפחות מערכת אחת"
+CHANGES_VIA_BOT = "השינויים נעשים עכשיו דרך סול בטלגרם"
+NOT_FOUND = "העמוד לא נמצא."
+PAYMENT_DESCRIPTION = "מנוי חודשי, ספק טרם נבחר"
 
 
 def _container(request: Request):
@@ -198,3 +208,205 @@ async def signup(
         return _landing(request, code=code.strip(), name=name.strip(), error=BAD_INVITE,
                         status=400)
     return _signed_in(request, owner_id)
+
+
+# --- session pages: connect, site picker, price, payment stub, ready -----------------------
+
+def _to_landing() -> RedirectResponse:
+    return RedirectResponse("/", status_code=303)
+
+
+def _session(request: Request) -> tuple[int, str] | None:
+    """(owner_id, CSRF token) for a valid session cookie whose owner is active."""
+    c = _container(request)
+    cookie = request.cookies.get(SESSION_COOKIE)
+    owner_id = c.sessions.read(cookie)
+    if owner_id is None:
+        return None
+    with session_scope(c.session_factory) as s:
+        owner = s.get(Owner, owner_id)
+        if owner is None or not owner.active:
+            return None
+    return owner_id, c.sessions.csrf_token(cookie)
+
+
+def _csrf_ok(request: Request, token: str) -> bool:
+    return _container(request).sessions.check_csrf(request.cookies.get(SESSION_COOKIE), token)
+
+
+def _owner_sites(s, owner_id: int) -> list[Site]:
+    """Only ever this owner's sites (Review Focus 2)."""
+    return list(s.scalars(
+        select(Site).where(Site.owner_id == owner_id).order_by(Site.created_at, Site.se_site_id)
+    ))
+
+
+def _ils(agorot: int) -> str:
+    return f"{agorot / 100:.2f} ₪"
+
+
+@router.get("/connect-site")
+async def connect_site(request: Request):
+    sess = _session(request)
+    if sess is None:
+        return _to_landing()
+    owner_id, csrf = sess
+    c = _container(request)
+    with session_scope(c.session_factory) as s:
+        first_name = (s.get(Owner, owner_id).display_name.split() or [""])[0]
+        has_sites = bool(_owner_sites(s, owner_id))
+    return templates.TemplateResponse(
+        request, "connect.html",
+        {"first_name": first_name, "has_sites": has_sites, "csrf": csrf},
+    )
+
+
+@router.post("/connect-site")
+async def connect_site_start(request: Request, csrf: str = Form("")):
+    sess = _session(request)
+    if sess is None:
+        return _to_landing()
+    if not _csrf_ok(request, csrf):
+        return _message(request, FORM_EXPIRED, 403)
+    c = _container(request)
+    with session_scope(c.session_factory) as s:
+        url = onboarding.create_connect_request(s, sess[0], c.clock.now(), c.settings)
+    # same host as this page, so the session cookie is there when the callback lands
+    return RedirectResponse(urlsplit(url).path, status_code=303)
+
+
+def _sites_page(request: Request, owner_id: int, csrf: str, *, error: str | None = None,
+                status: int = 200):
+    c = _container(request)
+    with session_scope(c.session_factory) as s:
+        linked = s.get(Owner, owner_id).telegram_chat_id is not None
+        rows = []
+        for site in _owner_sites(s, owner_id):
+            p = price_site(site)
+            rows.append({
+                "id": site.se_site_id,
+                "name": site.card_name or site.portal_name,
+                "monitored": site.monitored,
+                "portal_kw": site.peak_power_kwp_reported,
+                "price": describe_price(p.agorot, p.is_estimate),
+            })
+    return templates.TemplateResponse(
+        request, "sites.html",
+        {"sites": rows, "linked": linked, "csrf": csrf, "error": error,
+         "via_bot": CHANGES_VIA_BOT},
+        status_code=status,
+    )
+
+
+@router.get("/sites")
+async def sites(request: Request):
+    sess = _session(request)
+    if sess is None:
+        return _to_landing()
+    return _sites_page(request, *sess)
+
+
+@router.post("/sites")
+async def sites_save(request: Request):
+    sess = _session(request)
+    if sess is None:
+        return _to_landing()
+    owner_id, csrf = sess
+    form = await request.form()
+    if not _csrf_ok(request, str(form.get("csrf", ""))):
+        return _message(request, FORM_EXPIRED, 403)
+    ticked = {str(v) for v in form.getlist("site")}
+    c = _container(request)
+    with session_scope(c.session_factory) as s:
+        if s.get(Owner, owner_id).telegram_chat_id is not None:
+            return _message(request, CHANGES_VIA_BOT, 409, bot_link=True)
+        own = _owner_sites(s, owner_id)
+        picked = any(str(site.se_site_id) in ticked for site in own)  # ids of others ignored
+        if picked:
+            for site in own:
+                site.monitored = str(site.se_site_id) in ticked
+    if not picked:
+        return _sites_page(request, owner_id, csrf, error=PICK_ONE, status=400)
+    return RedirectResponse("/price", status_code=303)
+
+
+def _monitored_total(s, owner_id: int) -> tuple[list[Site], int | None, bool]:
+    monitored = [site for site in _owner_sites(s, owner_id) if site.monitored]
+    agorot, estimate = price_total([price_site(site) for site in monitored])
+    return monitored, agorot, estimate
+
+
+@router.get("/price")
+async def price(request: Request):
+    sess = _session(request)
+    if sess is None:
+        return _to_landing()
+    owner_id, csrf = sess
+    c = _container(request)
+    with session_scope(c.session_factory) as s:
+        monitored, agorot, estimate = _monitored_total(s, owner_id)
+        names = [site.card_name or site.portal_name for site in monitored]
+    if not monitored:
+        return RedirectResponse("/sites", status_code=303)
+    return templates.TemplateResponse(
+        request, "price.html",
+        {"names": names, "total": describe_price(agorot, estimate), "csrf": csrf},
+    )
+
+
+@router.post("/pay")
+async def pay(request: Request, csrf: str = Form("")):
+    sess = _session(request)
+    if sess is None:
+        return _to_landing()
+    if not _csrf_ok(request, csrf):
+        return _message(request, FORM_EXPIRED, 403)
+    owner_id = sess[0]
+    c = _container(request)
+    with session_scope(c.session_factory) as s:
+        monitored, agorot, estimate = _monitored_total(s, owner_id)
+        if not monitored:
+            return RedirectResponse("/sites", status_code=303)
+        payment_id = payments.create_stub_checkout(
+            s, owner_id, agorot, estimate, PAYMENT_DESCRIPTION, c.clock.now()
+        ).id
+    return RedirectResponse(f"/pay/{payment_id}", status_code=303)
+
+
+@router.get("/pay/{payment_id}")
+async def pay_page(payment_id: str, request: Request):
+    sess = _session(request)
+    if sess is None:
+        return _to_landing()
+    c = _container(request)
+    with session_scope(c.session_factory) as s:
+        payment = s.get(Payment, payment_id)
+        if payment is None or payment.owner_id != sess[0]:  # Review Focus 2
+            return _message(request, NOT_FOUND, 404)
+        agorot, estimate = payment.amount_agorot, payment.amount_is_estimate
+    return templates.TemplateResponse(
+        request, "pay.html",
+        {
+            "amount": _ils(agorot) if agorot is not None else None,
+            "estimate_label": ESTIMATE_LABEL if estimate else None,
+            "unknown_price": UNKNOWN_PRICE,
+            "vat_note": VAT_NOTE,
+        },
+    )
+
+
+@router.get("/ready")
+async def ready(request: Request):
+    sess = _session(request)
+    if sess is None:
+        return _to_landing()
+    c = _container(request)
+    with session_scope(c.session_factory) as s:
+        owner = s.get(Owner, sess[0])
+        linked, link_token = owner.telegram_chat_id is not None, owner.link_token
+    if linked or not link_token:  # the token is cleared only when the chat is linked
+        return _message(request, ALREADY_LINKED, bot_link=True)
+    bot = c.settings.telegram_bot_username
+    return templates.TemplateResponse(
+        request, "ready.html", {"deep_link": f"https://t.me/{bot}?start={link_token}"},
+    )

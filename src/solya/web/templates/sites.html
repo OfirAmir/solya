@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block content %}
+    <section class="card">
+    {% if not sites %}
+      <h1>עדיין אין מערכת מחוברת.</h1>
+      <p><a class="button" href="/connect-site">חזרה לחיבור</a></p>
+    {% else %}
+      <h1>אילו מערכות לעקוב?</h1>
+      {% if linked %}<p class="warn" role="status">{{ via_bot }}</p>{% endif %}
+      {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+      <form class="grid" action="/sites" method="post">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        {% for site in sites %}
+        <label class="site">
+          <input type="checkbox" name="site" value="{{ site.id }}"{% if site.monitored %} checked{% endif %}{% if linked %} disabled{% endif %}>
+          <span>
+            <strong>{{ site.name }}</strong>
+            <span class="note">מזהה <bdi>{{ site.id }}</bdi></span>
+            {% if site.portal_kw is not none %}<span class="note">הספק בפורטל <bdi>{{ site.portal_kw }}</bdi> קילוואט, לא לחיוב</span>{% endif %}
+            <span class="price">{{ site.price }}</span>
+          </span>
+        </label>
+        {% endfor %}
+        {% if not linked %}
+        <div class="row">
+          <button type="submit">המשך</button>
+          <a href="/connect-site">חיבור מערכת נוספת</a>
+        </div>
+        {% endif %}
+      </form>
+    {% endif %}
+    </section>
+{% endblock %}

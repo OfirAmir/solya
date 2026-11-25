@@ -8,7 +8,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from solya.db import session_scope
-from solya.models import Site
+from solya.models import Owner, Site
 from solya.services import onboarding
 from solya.solaredge.oauth import build_authorize_url, exchange_code
 
@@ -19,7 +19,18 @@ COOKIE = "solya_connect"
 INVALID_LINK = "הקישור אינו בתוקף. שלחו /connect בבוט כדי לקבל קישור חדש."
 CANCELLED = "החיבור בוטל או נכשל. אפשר לנסות שוב עם /connect."
 CONNECTED = "המערכת חוברה בהצלחה. אפשר לחזור לטלגרם."
+SITE_PICKER = "/sites"
 FAILED = "משהו השתבש בחיבור המערכת. אפשר לנסות שוב עם /connect."
+
+
+def _continue_on_web(owner: Owner) -> bool:
+    """A web sign-up who has not linked Telegram continues on the site picker; the first
+    connected site moves a lead to "connected". Bot owners keep the success page."""
+    if owner.signup_source != "web" or owner.telegram_chat_id is not None:
+        return False
+    if owner.subscription_status == "lead":
+        owner.subscription_status = "connected"
+    return True
 
 
 def _html(text: str, status: int = 200) -> HTMLResponse:
@@ -113,10 +124,13 @@ async def oauth_callback(
             req = s.get(onboarding.ConnectRequest, token)
             site, is_first = onboarding.register_site(s, req, info, c.clock.now())
             sid, new_owner = site.se_site_id, site.owner_id
+            to_picker = _continue_on_web(s.get(Owner, new_owner))
         await c.reporter.on_site_connected(sid, is_first)
         if previous_owner is not None and previous_owner != new_owner:
             await c.reporter.on_site_reassigned(sid, previous_owner, new_owner)
     except Exception as e:
         log.error("oauth callback failed after the site access check: %s", type(e).__name__)
         return _html(FAILED, 502)
+    if to_picker:
+        return RedirectResponse(SITE_PICKER, status_code=303)
     return _html(CONNECTED)
