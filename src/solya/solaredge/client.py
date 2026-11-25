@@ -96,7 +96,8 @@ class SolarEdgeClient:
         priority: Priority = "essential",
     ) -> Any:
         params = params or []
-        for attempt in (0, 1):
+        refreshed = rate_retried = False
+        while True:
             # Token first (it may take the call lock itself on refresh), then the lock.
             token = await self._tokens.get_access_token(site_id)
             async with self._budget.call_lock:
@@ -117,12 +118,21 @@ class SolarEdgeClient:
                 self._budget.record(site_id, path, status, 200 <= status < 300)
                 self._store_raw(site_id, path, params, status, body)
             if status == 401:
-                if attempt == 0:
+                if not refreshed:
+                    refreshed = True
                     await self._tokens.force_refresh(site_id)
                     continue
                 raise AuthExpired(f"401 on {path} after token refresh")
-            return self._check(resp, path, body)
-        raise AssertionError("unreachable")  # pragma: no cover
+            try:
+                return self._check(resp, path, body)
+            except RateLimited as exc:
+                # R22: one retry of the same call after a short Retry-After (burst limit).
+                delay = None if rate_retried else self._budget.retry_delay(exc)
+                if delay is None:
+                    raise
+                rate_retried = True
+                log.info("429 on %s; retrying once in %.1f s", path, delay)
+                await self._budget.sleep(delay)
 
     def _store_raw(self, site_id: int, path: str, params: Params, status: int, body: Any) -> None:
         with session_scope(self._factory) as s:
@@ -160,7 +170,10 @@ class SolarEdgeClient:
                 remaining_minute = int(resp.headers.get("x-ratelimit-remaining-minute", "0"))
             except ValueError:
                 remaining_minute = 0
-            month_exhausted = remaining_minute > 0 and retry_after is None
+            month_exhausted = (
+                resp.headers.get("x-ratelimit-remaining-month", "").strip() == "0"
+                or (remaining_minute > 0 and retry_after is None)
+            )
             raise RateLimited(
                 f"429 on {path}", retry_after=retry_after, month_exhausted=month_exhausted
             )

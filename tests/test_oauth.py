@@ -50,7 +50,10 @@ def mgr(db, settings, cipher, http, clock, reauth_calls):
     async def on_reauth(site_id):
         reauth_calls.append(site_id)
 
-    budget = CreditBudget(db, settings, clock)
+    async def sleep(seconds):  # R22 spacing: advance the fixed clock instead of waiting
+        clock.advance(timedelta(seconds=seconds))
+
+    budget = CreditBudget(db, settings, clock, sleep=sleep)
     return TokenManager(db, settings, cipher, http, budget, clock, on_reauth)
 
 
@@ -175,6 +178,20 @@ async def test_refresh_falls_back_to_previous(db, mgr, clock, cipher):
     r = row(db)
     assert cipher.decrypt(r.refresh_enc) == "r3"
     assert cipher.decrypt(r.previous_refresh_enc) == "r1"  # the working token stays as fallback
+
+
+@respx.mock
+async def test_refresh_429_retried_once(db, mgr, clock, cipher):
+    """R22: a burst 429 on the token endpoint is retried once; the rotation persists."""
+    seed(db, mgr, clock, 60)
+    route = respx.post(TOKEN_URL).mock(
+        side_effect=[httpx.Response(429, headers={"retry-after": "4"}), ok("a2", "r2")]
+    )
+    assert await mgr.get_access_token(SITE) == "a2"
+    assert route.call_count == 2
+    sent = [json.loads(c.request.content)["refresh_token"] for c in route.calls]
+    assert sent == ["r1", "r1"]
+    assert cipher.decrypt(row(db).refresh_enc) == "r2"
 
 
 @respx.mock

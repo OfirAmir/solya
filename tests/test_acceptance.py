@@ -575,7 +575,8 @@ async def test_a9_token_rotation_and_idle(settings, load_fixture, tmp_path, monk
                 for sid in (FARM, HOME):
                     with session_scope(c.session_factory) as s:
                         refreshed_at = s.get(SiteToken, sid).refreshed_at
-                    if refreshed_at == clock.now():
+                    # R22 spacing moves the clock between the two sites' refreshes.
+                    if refreshed_at > last_refresh[sid]:
                         refreshed_on[sid].append(d)
                         last_refresh[sid] = refreshed_at
                     assert clock.now() - last_refresh[sid] <= timedelta(days=7)

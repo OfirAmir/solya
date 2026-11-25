@@ -173,6 +173,19 @@ class TokenManager:
                 raise AuthExpired(f"site {site_id} needs re-authorization")
 
     async def _call_refresh(self, site_id: int, refresh_token: str) -> TokenPair:
+        try:
+            return await self._call_refresh_once(site_id, refresh_token)
+        except RateLimited as exc:
+            # R22: a 429 is refused at the gateway, so the same refresh token is still
+            # valid; retry once after a short Retry-After, outside the call lock.
+            delay = self._budget.retry_delay(exc)
+            if delay is None:
+                raise
+            log.info("token endpoint 429 for site %s; retrying once in %.1f s", site_id, delay)
+            await self._budget.sleep(delay)
+            return await self._call_refresh_once(site_id, refresh_token)
+
+    async def _call_refresh_once(self, site_id: int, refresh_token: str) -> TokenPair:
         async with self._budget.call_lock:
             await self._budget.acquire(site_id, TOKEN_ENDPOINT, "essential")
             try:

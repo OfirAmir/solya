@@ -10,12 +10,14 @@ from solya.clock import Clock
 from solya.config import Settings
 from solya.db import SessionFactory, session_scope
 from solya.models import ApiLedger
-from solya.solaredge.errors import BudgetExceeded
+from solya.solaredge.errors import BudgetExceeded, RateLimited
 
 Priority = Literal["essential", "optional"]
 
 OPTIONAL_FRACTION = 0.9
 WINDOW_SECONDS = 60
+# A 429 is retried once only if SolarEdge asks for at most this long a wait (R22).
+MAX_RETRY_AFTER_SECONDS = 60.0
 
 
 class CreditBudget:
@@ -83,8 +85,25 @@ class CreditBudget:
         d = min(day, calendar.monthrange(year, month)[1])
         return datetime(year, month, d, tzinfo=timezone.utc)
 
+    async def sleep(self, seconds: float) -> None:
+        await self._sleep(seconds)
+
+    def retry_delay(self, exc: RateLimited) -> float | None:
+        """Seconds to wait before retrying a 429 once, or None when it must not be retried."""
+        if exc.month_exhausted:
+            return None
+        delay = exc.retry_after
+        if delay is None:
+            delay = self._settings.budget_min_interval_seconds
+        if delay > MAX_RETRY_AFTER_SECONDS:
+            return None
+        return max(delay, 0.0)
+
     async def _wait_for_minute_slot(self) -> None:
+        """Every call (credited or not) is at least ``budget_min_interval_seconds`` after
+        the previous one, and at most ``budget_per_minute`` fall in any rolling minute."""
         limit = self._settings.budget_per_minute
+        spacing = self._settings.budget_min_interval_seconds
         while True:
             now = self._clock.now()
             with session_scope(self._factory) as s:
@@ -95,6 +114,11 @@ class CreditBudget:
                         .order_by(ApiLedger.ts)
                     )
                 )
+            if times and spacing > 0:
+                since_last = (now - times[-1]).total_seconds()
+                if since_last < spacing:
+                    await self._sleep(spacing - since_last)
+                    continue
             if len(times) < limit:
                 return
             wait = WINDOW_SECONDS + 1 - (now - times[0]).total_seconds()

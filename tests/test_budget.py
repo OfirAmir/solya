@@ -90,3 +90,43 @@ def test_used_by_site(db, settings, clock):
     seed(db, 3, clock.now(), site_id=2)
     b = make(db, settings, clock)
     assert b.used_by_site(2, clock.now() - timedelta(days=1)) == 3
+
+
+async def test_calls_spaced_by_min_interval(db, settings, clock):
+    """R22: a call right after another waits out the minimum spacing (burst limit)."""
+    assert settings.budget_min_interval_seconds == 7.5
+    seed(db, 1, clock.now() - timedelta(seconds=2))
+    calls = []
+
+    async def fake_sleep(seconds):
+        calls.append(seconds)
+        clock.advance(timedelta(seconds=seconds))
+
+    b = make(db, settings, clock, sleep=fake_sleep)
+    await b.acquire(1, "sites", "essential")
+    assert calls == [pytest.approx(5.5)]
+
+
+async def test_spacing_counts_uncredited_calls(db, settings, clock):
+    seed(db, 1, clock.now() - timedelta(seconds=1), credited=False)
+    calls = []
+
+    async def fake_sleep(seconds):
+        calls.append(seconds)
+        clock.advance(timedelta(seconds=seconds))
+
+    b = make(db, settings, clock, sleep=fake_sleep)
+    await b.acquire(1, "sites", "essential")
+    assert calls == [pytest.approx(6.5)]
+
+
+async def test_no_wait_when_last_call_is_old_enough(db, settings, clock):
+    seed(db, 1, clock.now() - timedelta(seconds=8))
+    calls = []
+
+    async def fake_sleep(seconds):
+        calls.append(seconds)
+
+    b = make(db, settings, clock, sleep=fake_sleep)
+    await b.acquire(1, "sites", "essential")
+    assert calls == []

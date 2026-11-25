@@ -209,6 +209,7 @@ def test_replay_without_stored_data_fails(cfg, factory, capsys):
 
 
 def test_pull_prints_parsed_bundle_without_secrets(cfg, factory, load_fixture, capsys):
+    cfg = cfg.model_copy(update={"budget_min_interval_seconds": 0})  # real clock: no 7.5 s waits
     seed_sites(factory)
     cipher = TokenCipher(cfg.token_encryption_key.get_secret_value())
     now = datetime.now(timezone.utc)

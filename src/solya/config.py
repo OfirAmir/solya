@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     budget_monthly_credits: int = 2000
     budget_billing_day: int = 1
     budget_per_minute: int = 8
+    # Burst limit (recon brief: ~5 calls within seconds got 429): space every call.
+    budget_min_interval_seconds: float = 7.5
     max_credits_per_site_month: int = 350
     stale_after_minutes: int = 60
     fault_reminder_hours: int = 3

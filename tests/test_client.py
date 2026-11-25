@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import httpx
@@ -35,11 +35,18 @@ async def make_client(db, settings, clock):
         s.add(Owner(id=1, display_name="o", telegram_chat_id=1, created_at=clock.now()))
         s.add(Site(se_site_id=SITE, owner_id=1, portal_name="p", tz="Asia/Jerusalem", created_at=clock.now()))
     tokens = FakeTokens()
-    budget = CreditBudget(db, settings, clock)
+    sleeps = []
+
+    async def sleep(seconds):  # R22 spacing: advance the fixed clock instead of waiting
+        sleeps.append(seconds)
+        clock.advance(timedelta(seconds=seconds))
+
+    budget = CreditBudget(db, settings, clock, sleep=sleep)
     async with httpx.AsyncClient() as http:
         client = SolarEdgeClient(http, settings, tokens, budget, db, clock)
         client.tokens = tokens
         client.budget = budget
+        client.sleeps = sleeps
         yield client
 
 
@@ -127,6 +134,49 @@ async def test_429_maps_rate_limited(make_client):
             await make_client.get_site(SITE)
     assert ei.value.retry_after == 30
     assert ei.value.month_exhausted is False
+
+
+async def test_429_short_retry_after_retries_once(make_client, load_fixture):
+    """R22: a burst 429 with a small Retry-After is retried once after waiting."""
+    with respx.mock:
+        route = respx.get(f"{BASE}/sites/{SITE}").mock(side_effect=[
+            httpx.Response(429, headers={"retry-after": "5"}),
+            httpx.Response(200, json=load_fixture("solaredge/site_farm.json")),
+        ])
+        info = await make_client.get_site(SITE)
+    assert info.site_id == SITE
+    assert route.call_count == 2
+    assert 5 in make_client.sleeps
+
+
+async def test_429_retried_only_once(make_client):
+    with respx.mock:
+        route = respx.get(f"{BASE}/sites/{SITE}").mock(
+            return_value=httpx.Response(429, headers={"retry-after": "5"})
+        )
+        with pytest.raises(RateLimited):
+            await make_client.get_site(SITE)
+    assert route.call_count == 2
+
+
+async def test_429_long_retry_after_not_retried(make_client):
+    with respx.mock:
+        route = respx.get(f"{BASE}/sites/{SITE}").mock(
+            return_value=httpx.Response(429, headers={"retry-after": "86400"})
+        )
+        with pytest.raises(RateLimited):
+            await make_client.get_site(SITE)
+    assert route.call_count == 1
+
+
+async def test_429_month_header_zero_is_exhausted_not_retried(make_client):
+    with respx.mock:
+        route = respx.get(f"{BASE}/sites/{SITE}").mock(return_value=httpx.Response(
+            429, headers={"retry-after": "30", "x-ratelimit-remaining-month": "0"}))
+        with pytest.raises(RateLimited) as ei:
+            await make_client.get_site(SITE)
+    assert ei.value.month_exhausted is True
+    assert route.call_count == 1
 
 
 async def test_429_month_exhausted(make_client):

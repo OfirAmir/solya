@@ -59,16 +59,17 @@ def mock_all(load_fixture, overview=None):
 
 
 async def test_evening_pull_full_bundle(client, db, clock, load_fixture):
+    started = clock.now()  # R22 spacing advances the clock during the pull
     with respx.mock:
         mock_all(load_fixture)
         b = await pull_site(client, db, clock, SITE, "evening", DAY)
     assert b.errors == {}
     assert b.site and b.overview and b.alerts and b.inverters and b.lifetime
-    assert b.pulled_at == clock.now()
+    assert b.pulled_at == started
     with session_scope(db) as s:
         row = s.get(Site, SITE)
         assert row.expected_inverters == ["7E04E44D-B3"]
-        assert row.devices_fetched_at == clock.now()
+        assert row.devices_fetched_at == started
         assert row.last_update_time is not None and row.lat is not None
 
 
@@ -133,3 +134,29 @@ async def test_malformed_overview_recorded_not_fatal(client, db, clock, load_fix
         b = await pull_site(client, db, clock, SITE, "evening", DAY)
     assert "overview" in b.errors and b.overview is None
     assert b.alerts is not None
+
+
+async def test_pull_calls_are_spaced(client, db, clock, load_fixture):
+    """R22: no burst; consecutive SolarEdge calls are >= 7.5 s apart."""
+    with respx.mock:
+        mock_all(load_fixture)
+        await pull_site(client, db, clock, SITE, "evening", DAY)
+    with session_scope(db) as s:
+        ts = [r.ts for r in s.query(ApiLedger).order_by(ApiLedger.id)]
+    assert len(ts) == 6
+    gaps = [(b - a).total_seconds() for a, b in zip(ts, ts[1:])]
+    assert min(gaps) >= 7.5
+
+
+async def test_site_429_retried_and_day_kept(client, db, clock, load_fixture):
+    """A burst 429 on /sites is retried once, so the pull keeps its site answer."""
+    with respx.mock:
+        r = mock_all(load_fixture)
+        r["site"].side_effect = [
+            httpx.Response(429, headers={"retry-after": "3"}),
+            httpx.Response(200, json=load_fixture("solaredge/site_farm.json")),
+        ]
+        b = await pull_site(client, db, clock, SITE, "evening", DAY)
+    assert b.errors == {}
+    assert b.site is not None and b.overview is not None
+    assert r["site"].call_count == 2
