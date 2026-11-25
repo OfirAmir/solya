@@ -152,7 +152,10 @@ def serve(settings: Settings, host: str = "0.0.0.0", port: int = 8000) -> None: 
     configure_logging()
     app = create_app(build_container(settings))
     # access log would record the OAuth callback query string (code)
-    uvicorn.run(app, host=host, port=port, access_log=False)
+    uvicorn.run(
+        app, host=host, port=port, access_log=False,
+        proxy_headers=True, forwarded_allow_ips=",".join(settings.trusted_proxies),
+    )
 
 
 def main() -> None:  # pragma: no cover
