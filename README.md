@@ -55,7 +55,7 @@ Do these steps in order.
    docker compose up -d
    ```
 
-   The database lives in `./data` (a SQLite file, mounted at `/app/data`). Back that folder up. Logs: `docker compose logs -f solya`. Health check: `GET /healthz`.
+   The database lives in `./data` (a SQLite file, mounted at `/app/data`). Back that folder up. Logs: `docker compose logs -f solya`. Health check: `GET /healthz` (on the host, `curl http://127.0.0.1:8000/healthz`: the port is published on loopback only, see step 8).
 8. **Put HTTPS in front of port 8000.** The OAuth callback must be reachable on a public HTTPS host. Any of these works: Caddy, Cloudflare Tunnel, or a host's managed TLS. A minimal Caddy setup:
 
    ```
@@ -68,7 +68,7 @@ Do these steps in order.
 
    **Under Docker Compose the default `["127.0.0.1"]` is wrong.** Caddy's connection to `localhost:8000` reaches the container through Docker's port proxy, so inside the container the peer is the compose network's gateway (for example `172.18.0.1`), not `127.0.0.1`. That peer is not trusted, `X-Forwarded-For` is ignored, and every visitor gets the gateway's address as their client IP. They then share one rate-limit bucket: five wrong admin passwords from anyone lock the real admin out for 15 minutes, and ten sign-up or `/join` posts an hour from anyone block every sign-up. Pick one of these setups:
 
-   - **Caddy on the host.** In `docker-compose.yml`, publish the port on loopback only, so clients cannot bypass Caddy and reach the service directly:
+   - **Caddy on the host.** The shipped `docker-compose.yml` already publishes the port on loopback only, so clients cannot bypass Caddy and reach the service directly. Keep it that way:
 
      ```yaml
          ports:
@@ -94,7 +94,7 @@ Do these steps in order.
 
    - **Caddy in the same compose file.** Add Caddy as a service on the same network with `reverse_proxy solya:8000`, give it a fixed address (pin the subnet as above and set `ipv4_address` under the Caddy service's `networks: default:`), list that address in `TRUSTED_PROXIES`, and remove the `ports:` entry from the `solya` service so only Caddy can reach it.
 
-   For any other proxy (a tunnel, another host), list the address it connects from. Never list an address that clients can reach directly: anyone connecting from it could set their own `X-Forwarded-For`.
+   For any other proxy (a tunnel, another host), list the address it connects from. A proxy on another host cannot reach the loopback-only port, so change the `ports:` entry to an address that proxy can reach (and firewall it from everyone else). Never list an address that clients can reach directly: anyone connecting from it could set their own `X-Forwarded-For`.
 
    The web session cookie is `Secure` and bound to the host in `PUBLIC_BASE_URL`. Open the site only through that exact host: if the browser uses another host name (an alias, a bare IP, `www.`), the cookie is not sent and every journey page redirects back to `/`.
 9. **Create an invite and send it to Oren:**

@@ -8,5 +8,6 @@ services:
     volumes:
       - ./data:/app/data
     ports:
-      - "8000:8000"
+      # loopback only, behind a reverse proxy: see README step 8 (Put HTTPS in front of port 8000)
+      - "127.0.0.1:8000:8000"
     restart: unless-stopped
