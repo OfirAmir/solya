@@ -14,6 +14,7 @@ from solya.rules.comms import is_stale
 from solya.rules.daily import FaultView
 from solya.solaredge.parse import is_fault_mode
 
+
 def _base(key: str) -> str:
     return key.split("@")[0]
 

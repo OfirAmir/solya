@@ -282,10 +282,10 @@ def test_pull_runs_pipeline_silently_so_report_shows_the_day(cfg, factory, load_
 
 
 def test_pull_notify_sends(cfg, factory, load_fixture, monkeypatch):
+    from conftest import FakeChannel
+
     import solya.app as app_mod
     from solya.clock import FixedClock
-
-    from conftest import FakeChannel
 
     channel = FakeChannel()
     real = app_mod.build_container

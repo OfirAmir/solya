@@ -65,7 +65,7 @@ async def oauth_callback(
     request: Request,
     code: str | None = None,
     site_id: str | None = None,
-    siteId: str | None = None,  # noqa: N803 - alias, the echoed name is UNVERIFIED
+    siteId: str | None = None,  # alias: the echoed parameter name is UNVERIFIED
     external_id: str | None = None,
     state: str | None = None,
     error: str | None = None,
