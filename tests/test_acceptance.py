@@ -761,12 +761,14 @@ async def test_a11_web_journey_end_to_end(settings, load_fixture, cards, tmp_pat
                 r = tc.post("/pay", data={"csrf": csrf_re.search(tc.get("/price").text).group(1)})
                 assert r.status_code == 303
                 assert tc.get(r.headers["location"]).status_code == 200
-                assert tc.get("/ready").status_code == 200
                 with session_scope(c.session_factory) as s:
                     owner = s.scalars(select(Owner)).one()
                     owner_id, link_token = owner.id, owner.link_token
                     assert owner.telegram_chat_id is None
                     assert owner.subscription_status == "pending_payment"
+                ready = tc.get("/ready")
+                assert ready.status_code == 200
+                assert f"https://t.me/{settings.telegram_bot_username}?start={link_token}" in ready.text
 
                 # Telegram: /start <link_token> through the real bot handler.
                 delayed = []

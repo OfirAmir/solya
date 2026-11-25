@@ -81,7 +81,7 @@ Do these steps in order.
    ```
 
    Send the one that suits the person. The Telegram link registers them in the bot directly. The web link opens the sign-up form with the code filled in. The token works once, whichever link is used.
-10. **Oren connects his sites.** Through Telegram he sends `/connect` to the bot once per site** and approves each one at SolarEdge. One approval covers one site, so he does this twice. After each approval the bot confirms in Telegram. (Web sign-ups connect through the web journey below instead.)
+10. **Oren connects his sites, one approval per site**, so he does this twice. Through Telegram he sends `/connect` to the bot once per site and approves each one at SolarEdge; after each approval the bot confirms in Telegram. An owner who signed up on the web connects through the web journey below instead, and the same approval applies.
 11. **Set labels, tariffs and the rest.** Check the site ids first with `docker compose exec solya solya sites list`, then run the commands below (the ids are Oren's two sites):
 
     ```bash
