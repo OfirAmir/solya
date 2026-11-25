@@ -1,0 +1,16 @@
+[
+  {
+    "alertId": 101,
+    "siteId": 3033498,
+    "category": "INVERTER",
+    "type": "FAN_ALERT_1",
+    "impact": 3,
+    "status": "OPEN",
+    "firstTrigger": "2026-11-18 06:50:00",
+    "lastTrigger": "2026-11-24 06:50:00",
+    "closeDate": null,
+    "muteExpirationDate": null,
+    "component": {"name": "Inverter 1", "serialNumber": "7E04E44D-B3"},
+    "errorCodes": ["FAN_ALERT_1"]
+  }
+]
