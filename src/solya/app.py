@@ -108,7 +108,7 @@ def build_container(
 
 
 def create_app(container: Container, start_background: bool = True) -> FastAPI:
-    from solya.web import mount_static, router
+    from solya.web import add_page_headers, mount_static, router
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -140,6 +140,7 @@ def create_app(container: Container, start_background: bool = True) -> FastAPI:
     app.state.container = container
     app.include_router(router)
     mount_static(app)
+    add_page_headers(app)
     return app
 
 

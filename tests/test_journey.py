@@ -655,3 +655,29 @@ def test_linked_web_owner_and_no_session_keep_bot_copy(tc, container):
     _link(container, owner_id)
     r = tc.get("/oauth/callback", params={"error": "access_denied"})
     assert "אפשר לנסות שוב עם /connect." in r.text and RETRY_BUTTON not in r.text
+
+
+# --- caching and framing headers (final review M10) ------------------------------------
+
+
+def _assert_page_headers(r, path):
+    assert r.headers.get("cache-control") == "no-store", path
+    assert r.headers.get("x-frame-options") == "DENY", path
+    assert r.headers.get("content-security-policy") == "frame-ancestors 'none'", path
+
+
+def test_journey_and_admin_responses_not_cached_or_framed(tc, container):
+    for path in ["/", f"/join/{_invite(container)}", "/sites", "/admin/login"]:
+        _assert_page_headers(tc.get(path), path)  # /sites without a session: the redirect
+    _assert_page_headers(_signup(tc, _invite(container)), "POST /signup")
+    owner_id = container.sessions.read(tc.cookies[SESSION_COOKIE])
+    _add_site(container, owner_id, 4044)
+    for path in ["/connect-site", "/sites", "/price", "/ready", "/connect/no-such-token"]:
+        _assert_page_headers(tc.get(path), path)
+    _assert_page_headers(tc.get("/oauth/callback", params={"error": "access_denied"}),
+                         "/oauth/callback")
+
+
+def test_static_assets_stay_cacheable(tc):
+    r = tc.get("/static/style.css")
+    assert r.status_code == 200 and r.headers.get("cache-control") != "no-store"
