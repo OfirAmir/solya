@@ -13,7 +13,7 @@ from solya.db import SessionFactory, session_scope
 from solya.models import Site
 from solya.solaredge.budget import Priority
 from solya.solaredge.client import SolarEdgeClient
-from solya.solaredge.errors import AuthExpired, SolarEdgeError
+from solya.solaredge.errors import AuthExpired
 from solya.solaredge.models import Alert, InverterState, LifetimeEnergy, Overview, SiteInfo
 
 log = logging.getLogger(__name__)
@@ -58,7 +58,7 @@ async def pull_site(
             return await fn()
         except AuthExpired:
             raise
-        except (SolarEdgeError, KeyError, ValueError, TypeError) as exc:
+        except Exception as exc:  # noqa: BLE001 - an odd shape must not lose the other calls
             errors[name] = f"{type(exc).__name__}: {exc}"
             log.warning("site %s %s call failed: %s", site_id, name, type(exc).__name__)
             return None

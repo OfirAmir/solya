@@ -160,3 +160,15 @@ async def test_site_429_retried_and_day_kept(client, db, clock, load_fixture):
     assert b.errors == {}
     assert b.site is not None and b.overview is not None
     assert r["site"].call_count == 2
+
+
+async def test_unexpected_shape_is_recorded_not_raised(client, db, clock, load_fixture):
+    """I5: an AttributeError from an odd response shape costs only that call."""
+    with respx.mock:
+        r = mock_all(load_fixture)
+        r["alerts"].return_value = httpx.Response(200, json={"alerts": [{"alertId": 1}]})
+        r["inv"].return_value = httpx.Response(200, json={"inverters": {"S1": ["MPPT"]}})
+        b = await pull_site(client, db, clock, SITE, "evening", DAY)
+    assert set(b.errors) == {"alerts", "inverters"}
+    assert b.errors["alerts"].startswith("AttributeError")
+    assert b.site is not None and b.overview is not None and b.lifetime is not None
