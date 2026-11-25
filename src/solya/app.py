@@ -28,6 +28,7 @@ from solya.services.reporting import Reporter
 from solya.solaredge.budget import CreditBudget
 from solya.solaredge.client import SolarEdgeClient
 from solya.solaredge.oauth import TokenManager
+from solya.web.security import Sessions
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +53,7 @@ class Container:
     scheduler: SchedulerService
     ray: Any
     bot_app: Any = None
+    sessions: Sessions | None = None  # one signer for web journey and admin cookies
 
 
 def _ensure_db_dir(url: str) -> None:
@@ -91,6 +93,8 @@ def build_container(
         reporter=None, scheduler=None, ray=ray,  # type: ignore[arg-type]
     )
     holder["c"] = container
+    admin_password = settings.admin_password.get_secret_value() if settings.admin_password else None
+    container.sessions = Sessions(settings.effective_session_secret(), clock, admin_password)
     container.bot_app = build_bot_application(settings.telegram_bot_token.get_secret_value(), container)
     if channel is None:
         container.channel = TelegramChannel(container.bot_app.bot)
@@ -104,7 +108,7 @@ def build_container(
 
 
 def create_app(container: Container, start_background: bool = True) -> FastAPI:
-    from solya.web import router
+    from solya.web import mount_static, router
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -135,6 +139,7 @@ def create_app(container: Container, start_background: bool = True) -> FastAPI:
     app = FastAPI(lifespan=lifespan)
     app.state.container = container
     app.include_router(router)
+    mount_static(app)
     return app
 
 

@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block content %}
+    <section class="card">
+      <p class="message">{{ message }}</p>
+      {% if bot_url %}<a class="button" href="{{ bot_url }}">פתיחת הבוט בטלגרם</a>{% endif %}
+    </section>
+{% endblock %}

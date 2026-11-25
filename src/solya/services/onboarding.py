@@ -5,7 +5,7 @@ import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from solya.config import Settings
@@ -53,6 +53,59 @@ def redeem_invite(
     invite.owner_id = owner.id
     session.flush()
     return owner
+
+
+def _valid_signup_fields(name: str, email: str, phone: str) -> bool:
+    """PR #1's rules: name of 2+ chars, an "@" in the email, 9+ digits in the phone."""
+    return len(name) >= 2 and "@" in email and sum(ch.isdigit() for ch in phone) >= 9
+
+
+def signup_web(
+    session: Session, invite_token: str, name: str, email: str, phone: str, now: datetime
+) -> Owner | None:
+    """Create a web Owner and redeem its invite in the caller's transaction.
+
+    Raises ValueError("form") for bad fields (the invite is not touched). Returns None
+    when the invite is unknown or already used: a reused code never creates a second
+    Owner. Getting back into an unlinked web sign-up goes through /join
+    (`web_owner_for_invite`), not through a second sign-up."""
+    name, email, phone = name.strip(), email.strip(), phone.strip()
+    if not _valid_signup_fields(name, email, phone):
+        raise ValueError("form")
+    token = invite_token.strip()
+    # Claim the invite with one conditional UPDATE, so two concurrent submits of the
+    # same code cannot both pass a read-then-write check.
+    claimed = session.execute(
+        update(Invite)
+        .where(Invite.token == token, Invite.used_at.is_(None))
+        .values(used_at=now)
+    ).rowcount
+    if claimed != 1:
+        return None
+    owner = Owner(
+        display_name=name,
+        email=email,
+        phone=phone,
+        telegram_chat_id=None,
+        signup_source="web",
+        subscription_status="lead",
+        link_token=secrets.token_urlsafe(24),
+        active=True,
+        created_at=now,
+    )
+    session.add(owner)
+    session.flush()
+    session.execute(update(Invite).where(Invite.token == token).values(owner_id=owner.id))
+    return owner
+
+
+def web_owner_for_invite(session: Session, invite_token: str) -> Owner | None:
+    """The web Owner that redeemed this invite, or None (unknown, unused, or a bot sign-up)."""
+    invite = session.get(Invite, invite_token)
+    if invite is None or invite.owner_id is None:
+        return None
+    owner = session.get(Owner, invite.owner_id)
+    return owner if owner is not None and owner.signup_source == "web" else None
 
 
 def create_connect_request(

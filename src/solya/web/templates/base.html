@@ -1,0 +1,23 @@
+<!doctype html>
+<html dir="rtl" lang="he">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}סוליה{% endblock %}</title>
+<meta name="description" content="סיכום ערב למערכת הסולארית, מתוך הנתונים של המערכת.">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <div class="sun" aria-hidden="true"></div>
+      <span>סוליה</span>
+    </div>
+  </header>
+  <main class="grid">
+{% block content %}{% endblock %}
+  </main>
+</div>
+</body>
+</html>
