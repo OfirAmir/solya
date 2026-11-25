@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
@@ -14,6 +14,10 @@ from solya.rules.comms import is_stale
 from solya.rules.daily import FaultView
 
 FAULT_MODES = {"FAULT"}
+
+
+def _base(key: str) -> str:
+    return key.split("@")[0]
 
 
 @dataclass(frozen=True)
@@ -45,11 +49,15 @@ def detect_faults(
     is_daylight: bool,
     kind: str,
     stale_after_minutes: int = 60,
-) -> list[DetectedFault]:
-    """Faults visible in one pull. ``is_daylight`` is decided by the caller."""
+) -> list[DetectedFault] | None:
+    """Faults visible in one pull. ``is_daylight`` is decided by the caller.
+
+    Returns None when the site is stale or unknown: no inference is possible, so the
+    caller must skip ``sync_faults`` and leave open faults open.
+    """
     last_update = bundle.site.last_update_time if bundle.site is not None else None
     if is_stale(last_update, now, stale_after_minutes):
-        return []
+        return None
 
     found: list[DetectedFault] = []
 
@@ -103,29 +111,38 @@ def sync_faults(
 ) -> list[FaultEvent]:
     """Reconcile detected faults with stored records; never reopens a closed key."""
     rows = session.scalars(select(FaultRecord).where(FaultRecord.site_id == site_id)).all()
-    by_key = {r.key: r for r in rows}
+    keys = {r.key for r in rows}
+    open_bases = {_base(r.key) for r in rows if r.closed_at is None}
+    seen_bases = {_base(r.key) for r in rows}
     events: list[FaultEvent] = []
 
-    detected_keys = set()
+    detected_bases = set()
     for d in detected:
-        detected_keys.add(d.key)
-        if d.key in by_key:
+        base = _base(d.key)
+        detected_bases.add(base)
+        if base in open_bases:
+            continue
+        key = d.key
+        if base in seen_bases:  # a new episode of a closed fault
+            key = f"{base}@{d.first_seen.astimezone(timezone.utc):%Y%m%dT%H%MZ}"
+        if key in keys:
             continue
         rec = FaultRecord(
             site_id=site_id,
-            key=d.key,
+            key=key,
             source=d.source,
             code=d.code,
             serial=d.serial,
             first_seen=d.first_seen,
         )
         session.add(rec)
-        by_key[d.key] = rec
+        keys.add(key)
+        open_bases.add(base)
         events.append(NewFault(rec))
 
     if data_complete:
         for rec in rows:
-            if rec.closed_at is None and rec.key not in detected_keys:
+            if rec.closed_at is None and _base(rec.key) not in detected_bases:
                 rec.closed_at = now
                 if rec.notified_at is not None:
                     events.append(ClosedFault(rec))

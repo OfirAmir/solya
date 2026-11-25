@@ -53,7 +53,36 @@ def test_zero_production_evening_fault():
 def test_stale_detects_nothing():
     stale = NOW - timedelta(hours=3)
     b = bundle([alert()], production=0.0, last_update=stale)
-    assert detect_faults(b, [], NOW, True, "evening") == []
+    assert detect_faults(b, [], NOW, True, "evening") is None
+    no_site = PullBundle(None, None, [], {}, None, {}, NOW)
+    assert detect_faults(no_site, [], NOW, True, "evening") is None
+
+
+def test_stale_then_skip_keeps_fault_open(db):
+    _seed(db)
+    with db() as s:
+        sync_faults(s, 1, [DetectedFault("alert:7", "alert", "E12", "S1", NOW)], NOW, True)
+        stale = bundle([], last_update=NOW - timedelta(hours=3))
+        detected = detect_faults(stale, [], NOW, True, "midday")
+        if detected is not None:
+            sync_faults(s, 1, detected, NOW, True)
+        assert len(open_fault_views(s, 1)) == 1
+
+
+def test_fault_episode_recurs(db):
+    _seed(db)
+    first = DetectedFault("mode:S1", "mode", "FAULT", "S1", NOW)
+    again = DetectedFault("mode:S1", "mode", "FAULT", "S1", NOW + timedelta(days=1))
+    with db() as s:
+        ev = sync_faults(s, 1, [first], NOW, True)
+        ev[0].record.notified_at = NOW
+        assert [type(e) for e in sync_faults(s, 1, [], NOW + timedelta(hours=1), True)] == [ClosedFault]
+        ev2 = sync_faults(s, 1, [again], NOW + timedelta(days=1), True)
+        assert [type(e) for e in ev2] == [NewFault]
+        assert ev2[0].record.key == "mode:S1@20261125T1500Z"
+        assert ev[0].record.closed_at is not None
+        assert len(open_fault_views(s, 1)) == 1
+        assert sync_faults(s, 1, [again], NOW + timedelta(days=1, hours=1), True) == []
 
 
 def _seed(db):
@@ -75,9 +104,8 @@ def test_sync_new_then_closed(db):
         ev2 = sync_faults(s, 1, [], NOW + timedelta(hours=1), True)
         assert [type(e) for e in ev2] == [ClosedFault]
         assert open_fault_views(s, 1) == []
-        # never reopens
-        assert sync_faults(s, 1, det, NOW + timedelta(hours=2), True) == []
-        assert open_fault_views(s, 1) == []
+        old = s.query(FaultRecord).filter_by(key="alert:7").one()
+        assert old.closed_at is not None
 
 
 def test_sync_incomplete_data_does_not_close(db):
