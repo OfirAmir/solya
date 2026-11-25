@@ -1,0 +1,5 @@
+{
+  "siteId": 4552265,
+  "production": {"total": 85039, "unit": "WH", "toSelfConsumption": 5814, "toStorage": null, "toGrid": 79225},
+  "consumption": {"total": 9120, "unit": "WH", "fromPv": 5814, "fromStorage": null, "fromGrid": 3306}
+}

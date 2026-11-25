@@ -1,0 +1,66 @@
+# EC2 trial override: Caddy terminates HTTPS in front of Solya, in the same compose network.
+# This is the README step 8 option "Caddy in the same compose file".
+#
+# Use the wrapper, which adds both files, the project name and the kit's private plugin dir:
+#
+#   /opt/solya/deploy/ec2/compose up -d
+#
+# Relative paths below resolve against the project directory (the folder of the first
+# file, /opt/solya), not against this file's folder. Variables come from /opt/solya/.env,
+# where setup.sh writes them. Needs Docker Compose v2.24 or later for `!reset`.
+
+# A unique project name, so this stack's containers, network and volumes never collide
+# with another compose project on a shared host (setup.sh also writes
+# COMPOSE_PROJECT_NAME=solya-ec2 into .env).
+name: solya-ec2
+
+services:
+  solya:
+    # A unique image tag: the base file's plain `solya` could clash with another checkout.
+    image: solya-ec2
+    # The base file publishes 127.0.0.1:8000. Compose merges `ports` lists by appending, so
+    # leaving it out here would keep that mapping. Reset it: only Caddy reaches the app,
+    # over the compose network. `expose` documents the port without publishing it.
+    ports: !reset []
+    expose:
+      - "8000"
+    environment:
+      # Caddy's fixed address below. Uvicorn trusts X-Forwarded-For only from this peer,
+      # so the real client IP reaches the rate limits and the admin login lockout.
+      # This overrides any TRUSTED_PROXIES line in .env.
+      TRUSTED_PROXIES: '["${SOLYA_CADDY_IP:?SOLYA_CADDY_IP must be set in .env}"]'
+
+  caddy:
+    image: caddy:2.11.2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # Caddy accepts a full https://host origin as the site address. No trailing slash.
+      SOLYA_SITE_ADDRESS: ${PUBLIC_BASE_URL:?PUBLIC_BASE_URL must be set in .env}
+    volumes:
+      - ./deploy/ec2/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      default:
+        ipv4_address: ${SOLYA_CADDY_IP:?SOLYA_CADDY_IP must be set in .env}
+
+networks:
+  default:
+    ipam:
+      config:
+        # Pinned so Caddy's address (and so TRUSTED_PROXIES) never changes. setup.sh checks
+        # that the subnet overlaps no VPC range, route or other Docker network. Dynamic
+        # addresses (the solya container) come from ip_range, the upper half; Caddy's fixed
+        # address sits in the lower half, so the two can never collide. Docker also puts the
+        # network gateway on the first address of ip_range.
+        - subnet: ${SOLYA_SUBNET:?SOLYA_SUBNET must be set in .env}
+          ip_range: ${SOLYA_IP_RANGE:?SOLYA_IP_RANGE must be set in .env}
+
+volumes:
+  # Certificates and ACME account keys. Keep them: re-issuing on every restart would hit
+  # Let's Encrypt rate limits.
+  caddy_data:
+  caddy_config:

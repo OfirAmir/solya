@@ -1,0 +1,29 @@
+# Site address comes from PUBLIC_BASE_URL in /opt/solya/.env, for example
+# https://1-2-3-4.sslip.io (see docker-compose.caddy.yml). Caddy obtains the
+# Let's Encrypt certificate over ports 80/443 and redirects HTTP to HTTPS.
+{
+	# Only HTTP/1.1 and HTTP/2: the security group does not open UDP 443, so
+	# do not advertise HTTP/3.
+	servers {
+		protocols h1 h2
+	}
+	# Caddy's own log (certificates, proxy errors) goes to the container log.
+	# Error entries carry the request; delete the URI and the Referer so the
+	# OAuth callback's ?code= and /join/<token> never land in a log.
+	log default {
+		output stderr
+		format filter {
+			wrap console
+			fields {
+				request>uri delete
+				request>headers>Referer delete
+			}
+		}
+	}
+}
+
+# No `log` directive in the site: no access log, for the same reason.
+{$SOLYA_SITE_ADDRESS} {
+	encode gzip
+	reverse_proxy solya:8000
+}

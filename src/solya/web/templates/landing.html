@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block content %}
+    <section class="card">
+      <div class="badge">30 יום 100% שביעות רצון מובטחת</div>
+      <h1>סול שומרת על המערכת, כל ערב.</h1>
+      {% if ray %}
+      <p class="lede">סוליה מחברת את מערכת SolarEdge שלך ושולחת כרטיס סיכום אחרי השקיעה. הציון RAY FACTOR, הייצור וההכנסה. בלי ניחושים.</p>
+      {% else %}
+      <p class="lede">סוליה מחברת את מערכת SolarEdge שלך ושולחת כרטיס סיכום אחרי השקיעה: הייצור וההכנסה. בלי ניחושים.</p>
+      {% endif %}
+      <p class="note">לא אהבתם? בטלו וקבלו החזר על החודש הראשון. החזר כספי מלא.</p>
+      <p>49.97 ₪ לחודש למערכת עד 50 קילוואט מותקן, ועוד 1 ₪ לחודש לכל קילוואט מעל 50. {{ vat_note }} ספק הסליקה טרם נבחר.</p>
+    </section>
+    <section class="card" id="signup">
+      <h2>הרשמה</h2>
+      <p class="note">ההרשמה בהזמנה בלבד. אחר כך עוברים לאישור קריאה בלבד אצל SolarEdge. לא מדביקים מפתח API.</p>
+      {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+      <form class="grid" action="/signup" method="post">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <label>
+          שם
+          <input name="name" value="{{ name }}" required minlength="2" autocomplete="name">
+        </label>
+        <label>
+          אימייל
+          <input name="email" type="email" required autocomplete="email" dir="ltr">
+        </label>
+        <label>
+          טלפון
+          <input name="phone" type="tel" required autocomplete="tel" inputmode="tel" dir="ltr">
+        </label>
+        <label>
+          קוד הזמנה
+          <input name="code" value="{{ code }}" required autocomplete="off" spellcheck="false" dir="ltr">
+        </label>
+        <button type="submit">המשך לחיבור SolarEdge</button>
+      </form>
+    </section>
+{% endblock %}

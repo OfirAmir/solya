@@ -1,0 +1,12 @@
+[
+  {
+    "type": "INVERTER",
+    "serialNumber": "7F11A2B3-C4",
+    "manufacturer": "SolarEdge",
+    "model": "SE25K",
+    "name": "Inverter 1",
+    "connectedTo": null,
+    "active": true,
+    "nameplate": 25000
+  }
+]

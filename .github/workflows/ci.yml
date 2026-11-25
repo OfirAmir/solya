@@ -1,0 +1,62 @@
+name: CI
+
+# Pull requests run CI directly. Pushes to main and version tags run it through CD
+# (cd.yml calls this workflow first), so nothing runs twice.
+on:
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # Pillow's Raqm layout engine needs FriBiDi at runtime (Hebrew RTL card).
+      - name: Install system packages
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libfribidi0
+
+      - name: Install package
+        run: pip install -e '.[dev]'
+
+      - name: Run tests
+        run: pytest -q
+
+  docker:
+    name: Docker image builds and renders Hebrew
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image (amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: solya:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Check Raqm and the CLI inside the image
+        run: |
+          docker run --rm solya:ci python -c "from solya.render.card import assert_raqm; assert_raqm(); print('raqm ok')"
+          docker run --rm solya:ci solya genkey > /dev/null

@@ -1,0 +1,16 @@
+{
+  "siteId": 4552265,
+  "name": "IL 360 - אורן סופר",
+  "accountId": 771234,
+  "peakPower": 26.55,
+  "installationDate": "2025-02-03T00:00:00Z",
+  "lastUpdateTime": "2026-11-24T16:40:00+02:00",
+  "location": {
+    "country": "Israel",
+    "city": "Example City",
+    "timezone": "Asia/Jerusalem",
+    "latitude": 32.1,
+    "longitude": 34.8
+  },
+  "activationStatus": "ACTIVE"
+}

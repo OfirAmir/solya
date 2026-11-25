@@ -1,0 +1,12 @@
+.env
+data/
+__pycache__/
+.venv/
+out/*.png
+out/
+.superpowers/
+*.egg-info/
+.pytest_cache/
+.env.bak
+.env.tmp.*
+.docker/

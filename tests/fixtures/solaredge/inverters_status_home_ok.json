@@ -1,0 +1,14 @@
+{
+  "period": {"from": "2026-11-23T22:00:00Z", "to": "2026-11-24T14:40:00Z"},
+  "resolution": "HOUR",
+  "inverters": {
+    "7F11A2B3-C4": {
+      "inverterMode": {
+        "values": [
+          {"timestamp": "2026-11-24T13:00:00+02:00", "value": "MPPT"},
+          {"timestamp": "2026-11-24T14:00:00+02:00", "value": "MPPT"}
+        ]
+      }
+    }
+  }
+}

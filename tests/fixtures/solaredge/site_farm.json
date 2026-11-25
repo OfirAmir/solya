@@ -1,0 +1,19 @@
+{
+  "siteId": 3033498,
+  "name": "אורן סופר",
+  "accountId": 771234,
+  "peakPower": 65.52,
+  "installationDate": "2024-05-12T00:00:00Z",
+  "lastUpdateTime": "2026-11-24T16:45:00+02:00",
+  "location": {
+    "country": "Israel",
+    "city": "Example City",
+    "address": "1 Example St",
+    "timezone": "Asia/Jerusalem",
+    "latitude": 32.34,
+    "longitude": 34.89
+  },
+  "activationStatus": "ACTIVE",
+  "owner": {"name": "Example Owner", "email": "owner@example.com"},
+  "address": "1 Example St, Example City"
+}

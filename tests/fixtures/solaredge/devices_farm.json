@@ -1,0 +1,23 @@
+[
+  {
+    "type": "INVERTER",
+    "serialNumber": "7E04E44D-B3",
+    "manufacturer": "SolarEdge",
+    "model": "SE27.6K",
+    "name": "Inverter 1",
+    "connectedTo": null,
+    "active": true,
+    "nameplate": 27600
+  },
+  {
+    "type": "METER",
+    "serialNumber": "MTR-0001",
+    "manufacturer": "SolarEdge",
+    "model": "SE-WND-3Y400-MB-S1",
+    "name": "Meter 1",
+    "connectedTo": "7E04E44D-B3",
+    "active": true,
+    "meterType": "Production",
+    "form": "physical"
+  }
+]
