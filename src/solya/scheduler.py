@@ -123,14 +123,17 @@ class SchedulerService:
             sites = list(s.scalars(select(Site).order_by(Site.se_site_id)).all())
             specs = plan_day_jobs(sites, local_date, self._settings)
         for spec in specs:
-            if spec.run_at <= now:
+            # R19a: keep jobs that fell due within the misfire grace (e.g. a restart
+            # just after sunset) and run them now; outbox dedupe makes re-runs safe.
+            if spec.run_at <= now - timedelta(seconds=MISFIRE_GRACE_SECONDS):
                 continue
+            run_at = max(spec.run_at, now)
             job_id = f"{spec.kind}:{spec.target}:{local_date.isoformat()}"
             args: tuple = (spec.target, local_date)
             if spec.kind == "midday_check":
                 job_id += f":{spec.run_at.astimezone(self._tz):%H:%M}"
                 args = (spec.target,)
-            self._add(job_id, DateTrigger(run_date=spec.run_at), spec.kind, *args)
+            self._add(job_id, DateTrigger(run_date=run_at), spec.kind, *args)
         log.info("planned %d jobs for %s", len(specs), local_date)
 
     def schedule_retry(self, site_id: int, run_at: datetime) -> None:

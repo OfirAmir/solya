@@ -28,7 +28,6 @@ from solya.rules.comms import is_stale
 from solya.rules.daily import FaultView, SiteDay, compute_site_day, effective_label, persist_site_day
 from solya.rules.faults import (
     ClosedFault,
-    NewFault,
     detect_faults,
     due_reminders,
     open_fault_views,
@@ -68,6 +67,20 @@ def _view(rec: FaultRecord) -> FaultView:
 def _owner_sites(session: Session, owner_id: int) -> list[Site]:
     return list(
         session.scalars(select(Site).where(Site.owner_id == owner_id).order_by(Site.se_site_id))
+    )
+
+
+def _unnotified_open_faults(session: Session, site_id: int) -> list[FaultRecord]:
+    return list(
+        session.scalars(
+            select(FaultRecord)
+            .where(
+                FaultRecord.site_id == site_id,
+                FaultRecord.closed_at.is_(None),
+                FaultRecord.notified_at.is_(None),
+            )
+            .order_by(FaultRecord.first_seen, FaultRecord.id)
+        )
     )
 
 
@@ -197,15 +210,17 @@ class Reporter:
             chat, name = str(owner.telegram_chat_id), owner.display_name
             fault_label = label if count > 1 else None
             out: list[Outgoing] = []
+            # Every open, not-yet-notified fault: this pull's new ones and any whose
+            # earlier alert did not get through. The dedupe key prevents a double send.
+            for rec in _unnotified_open_faults(s, site_id):
+                text = he.fault_alert(
+                    name, fault_label, _view(rec), local_now, rec.first_seen.astimezone(tz)
+                )
+                out.append((OutboundMessage(chat, "fault", text, None, f"fault:{site_id}:{rec.key}"),
+                            (rec.id, "notified_at")))
             for ev in events:
-                rec = ev.record
-                if isinstance(ev, NewFault):
-                    text = he.fault_alert(
-                        name, fault_label, _view(rec), local_now, rec.first_seen.astimezone(tz)
-                    )
-                    out.append((OutboundMessage(chat, "fault", text, None, f"fault:{site_id}:{rec.key}"),
-                                (rec.id, "notified_at")))
-                elif isinstance(ev, ClosedFault):
+                if isinstance(ev, ClosedFault):
+                    rec = ev.record
                     text = he.fault_closed(name, _view(rec), local_now)
                     out.append((OutboundMessage(chat, "fault", text, None, f"closed:{site_id}:{rec.key}"),
                                 (rec.id, "closed_notified_at")))
@@ -242,7 +257,10 @@ class Reporter:
 
     # ----------------------------------------------------------------- report
 
-    async def evening_report(self, owner_id: int, local_date: date, retry: bool = False) -> None:
+    async def evening_report(
+        self, owner_id: int, local_date: date, retry: bool = False, site_id: int | None = None
+    ) -> None:
+        """``retry`` re-sends after ``site_id`` recovered; the key is per site (R19b)."""
         now = self._clock.now()
         with session_scope(self._sf) as s:
             owner = s.get(Owner, owner_id)
@@ -279,7 +297,9 @@ class Reporter:
         except Exception:
             log.exception("card render failed for owner %s; sending text only", owner_id)
             png = None
-        key = f"report:{owner_id}:{local_date.isoformat()}" + (":retry" if retry else "")
+        key = f"report:{owner_id}:{local_date.isoformat()}"
+        if retry:
+            key += ":retry" + (f":{site_id}" if site_id is not None else "")
         await self._send(OutboundMessage(chat, "report", text, png, key))
 
     def _stored_day(
@@ -331,7 +351,7 @@ class Reporter:
             )
             owner_id = site.owner_id
         if recovered:
-            await self.evening_report(owner_id, local_date, retry=True)
+            await self.evening_report(owner_id, local_date, retry=True, site_id=site_id)
         else:
             log.info("retry pull for site %s still has no data; no report re-sent", site_id)
 

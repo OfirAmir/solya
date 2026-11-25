@@ -7,7 +7,7 @@ from astral.sun import sun
 from solya.clock import FixedClock
 from solya.db import session_scope
 from solya.models import Owner, Site
-from solya.scheduler import JobSpec, SchedulerService, is_daylight, plan_day_jobs
+from solya.scheduler import JobSpec, SchedulerService, is_daylight, plan_day_jobs, sunset_utc as plan_sunset
 
 DAY = date(2026, 11, 24)
 TZ = "Asia/Jerusalem"
@@ -179,3 +179,37 @@ async def test_job_runner_isolates_errors(db, settings, caplog):
     await svc._run("keepalive")
     assert reporter.calls == [("keepalive",)]
     assert "send_reminders" in caplog.text
+
+
+async def test_restart_after_sunset_keeps_due_jobs(db, settings):
+    # R19a: planning at sunset + 40 min still schedules the day's pull and report.
+    day = datetime.now(timezone.utc).astimezone(ZoneInfo(TZ)).date() + timedelta(days=2)
+    site = make_site(1)
+    start = plan_sunset(site, day) + timedelta(minutes=40)
+    clock = FixedClock(start)
+    with session_scope(db) as s:
+        s.add(Owner(id=1, display_name="o", telegram_chat_id=1, created_at=NOW))
+        s.add(make_site(1))
+
+    svc = SchedulerService(FakeReporter(), db, settings, clock)
+    svc.plan_today()  # scheduler not started: jobs stay pending, nothing fires
+    jobs = {j.id: j for j in svc.scheduler.get_jobs()}
+    d = day.isoformat()
+    assert {f"evening_pull:1:{d}", f"evening_report:1:{d}"} <= set(jobs)
+    assert jobs[f"evening_pull:1:{d}"].trigger.run_date == start
+    assert jobs[f"evening_report:1:{d}"].trigger.run_date == start
+
+
+async def test_plan_drops_jobs_older_than_grace(db, settings):
+    day = datetime.now(timezone.utc).astimezone(ZoneInfo(TZ)).date() + timedelta(days=2)
+    site = make_site(1)
+    clock = FixedClock(plan_sunset(site, day) + timedelta(minutes=25 + 61))
+    with session_scope(db) as s:
+        s.add(Owner(id=1, display_name="o", telegram_chat_id=1, created_at=NOW))
+        s.add(make_site(1))
+    svc = SchedulerService(FakeReporter(), db, settings, clock)
+    svc.plan_today()
+    ids = {j.id for j in svc.scheduler.get_jobs()}
+    d = day.isoformat()
+    assert f"evening_pull:1:{d}" not in ids  # due 61 min ago: beyond the grace
+    assert f"evening_report:1:{d}" in ids    # due 56 min ago: still within it

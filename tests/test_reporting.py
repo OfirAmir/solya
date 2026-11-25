@@ -11,7 +11,7 @@ from sqlalchemy import select
 from solya.clock import FixedClock
 from solya.crypto import TokenCipher
 from solya.db import session_scope
-from solya.messaging.base import Blocked, Ok
+from solya.messaging.base import Blocked, Invalid, Ok
 from solya.messaging.outbox import Outbox
 from solya.models import ApiLedger, ConnectRequest, DailyMetric, FaultRecord, OutboxEntry, Owner, Site, SiteToken
 from solya.render import card as card_mod
@@ -325,7 +325,7 @@ async def test_retry_after_missing(h, load_fixture, cards):
         await h.reporter.retry_pull_and_report(FARM, DAY)
 
     second = h.sent("report")[1]
-    assert second.dedupe_key == "report:1:2026-11-24:retry"
+    assert second.dedupe_key == f"report:1:2026-11-24:retry:{FARM}"
     assert second.text == REGRESSION
     assert second.image_png.startswith(PNG_MAGIC)
 
@@ -583,3 +583,63 @@ async def test_failed_alerts_call_closes_nothing(h, load_fixture):
         await h.reporter.evening_pull(FARM)
     with session_scope(h.db) as s:
         assert s.scalars(select(FaultRecord)).one().closed_at is None
+
+
+class FlakyChannel(FakeChannel):
+    """The first send raises a Telegram timeout; later sends succeed."""
+
+    def __init__(self):
+        super().__init__()
+        self.delivered = []
+
+    async def send(self, msg):
+        self.sent.append(msg)
+        if len(self.sent) == 1:
+            from telegram.error import TimedOut
+
+            raise TimedOut()
+        self.delivered.append(msg)
+        return Ok()
+
+
+@pytest.mark.parametrize("first", ["timeout", "invalid"])
+async def test_undelivered_fault_alert_retried_next_pull(h, load_fixture, first):
+    if first == "timeout":
+        h.reporter.channel = h.channel = FlakyChannel()
+    else:
+        h.channel.result = [Invalid("bad request"), Ok()]
+    for _ in range(3):
+        with respx.mock:
+            mock_site(load_fixture, FARM, alerts="alerts_fan.json")
+            await h.reporter.evening_pull(FARM)
+
+    faults = h.sent("fault")
+    assert len(faults) == 2  # the failed attempt, then one successful alert; none after
+    assert {m.dedupe_key for m in faults} == {f"fault:{FARM}:alert:101"}
+    if first == "timeout":
+        assert len(h.channel.delivered) == 1
+    with session_scope(h.db) as s:
+        assert s.scalars(select(FaultRecord)).one().notified_at is not None
+        assert s.get(OutboxEntry, f"fault:{FARM}:alert:101").status == "sent"
+
+
+async def test_two_sites_recover_on_separate_retries(h, load_fixture):
+    await pull_both(h, load_fixture, farm=dict(overview=httpx.Response(500)),
+                    home=dict(overview=httpx.Response(500)))
+    await h.reporter.evening_report(1, DAY)
+    assert sorted(sid for sid, _ in h.retries) == [FARM, HOME]
+
+    for sid in (FARM, HOME):
+        h.clock.set(dict(h.retries)[sid])
+        with respx.mock:
+            mock_site(load_fixture, sid)
+            await h.reporter.retry_pull_and_report(sid, DAY)
+
+    reports = h.sent("report")
+    assert [m.dedupe_key for m in reports] == [
+        "report:1:2026-11-24",
+        f"report:1:2026-11-24:retry:{FARM}",
+        f"report:1:2026-11-24:retry:{HOME}",
+    ]
+    assert "בית: המידע עדיין לא הגיע אלי, אני על זה." in reports[1].text
+    assert reports[2].text == REGRESSION
