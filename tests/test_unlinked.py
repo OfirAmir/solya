@@ -358,3 +358,28 @@ async def test_link_skips_comm_loss_of_unmonitored_site(h):
     keys = [m.dedupe_key for m in h.channel.sent]
     assert f"comm:{HOME}:{(NOW - timedelta(hours=3)).isoformat()}" in keys
     assert not any(k.startswith(f"comm:{HOME + 1}:") for k in keys)
+
+
+async def test_link_skips_comm_loss_of_paused_site(h):
+    since = NOW - timedelta(hours=3)
+    with session_scope(h.db) as s:
+        site = s.get(Site, HOME)
+        site.comm_state, site.comm_since, site.status = "loss", since, "paused"
+    _link_dana(h.db)
+    await h.reporter.on_owner_linked(2)
+    to_dana = [m for m in h.channel.sent if m.recipient == str(LATER_CHAT)]
+    assert not any(m.kind == "comm_loss" for m in to_dana)
+    assert not any(m.dedupe_key.startswith(f"comm:{HOME}:") for m in to_dana)
+
+
+async def test_link_sends_comm_loss_of_active_site(h):
+    since = NOW - timedelta(hours=3)
+    with session_scope(h.db) as s:
+        site = s.get(Site, HOME)
+        site.comm_state, site.comm_since = "loss", since
+        assert site.status == "active"
+    _link_dana(h.db)
+    await h.reporter.on_owner_linked(2)
+    to_dana = [m for m in h.channel.sent if m.recipient == str(LATER_CHAT)]
+    assert [m.dedupe_key for m in to_dana if m.kind == "comm_loss"] == [
+        f"comm:{HOME}:{since.isoformat()}"]

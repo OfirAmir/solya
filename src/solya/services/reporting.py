@@ -552,7 +552,8 @@ class Reporter:
                 if sent is not None and sent.status == "sent":
                     continue  # no second, unused connect link for a retried link
                 out.append(self._reauth_message(s, site, owner, chat, monitored_count, now))
-            elif site.monitored and site.comm_state == "loss" and site.comm_since is not None:
+            elif (site.status == "active" and site.monitored and site.comm_state == "loss"
+                  and site.comm_since is not None):
                 tz = ZoneInfo(site.tz)
                 out.append(OutboundMessage(
                     chat, "comm_loss",
