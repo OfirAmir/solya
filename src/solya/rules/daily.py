@@ -98,7 +98,9 @@ def compute_site_day(
     last_update = site.last_update_time
     if bundle is not None:
         last_update = bundle.site.last_update_time
-    if is_stale(last_update, now, settings.stale_after_minutes):
+    if is_stale(
+        last_update, now, settings.stale_after_minutes, lat=site.lat, lon=site.lon, tz=site.tz
+    ):
         day.state = "comm_loss"
         day.comm_since = last_update
         return day

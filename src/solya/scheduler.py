@@ -12,21 +12,19 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-from astral import Observer
-from astral.sun import sun
 from sqlalchemy import select
 
 from solya.clock import Clock
 from solya.config import Settings
 from solya.db import SessionFactory, session_scope
 from solya.models import Site
+from solya.rules.comms import BEIT_YITZHAK, sun_times
 
 if TYPE_CHECKING:
     from solya.services.reporting import Reporter
 
 log = logging.getLogger(__name__)
 
-BEIT_YITZHAK = (32.33, 34.89)
 MISFIRE_GRACE_SECONDS = 3600
 REMINDER_INTERVAL_MINUTES = 15
 
@@ -41,8 +39,7 @@ class JobSpec:
 
 
 def _sun(site: Site, local_date: date) -> dict[str, datetime]:
-    lat, lon = (site.lat, site.lon) if site.lat is not None and site.lon is not None else BEIT_YITZHAK
-    return sun(Observer(lat, lon), date=local_date, tzinfo=ZoneInfo(site.tz))
+    return sun_times(site.lat, site.lon, site.tz, local_date)
 
 
 def sunset_utc(site: Site, local_date: date) -> datetime:

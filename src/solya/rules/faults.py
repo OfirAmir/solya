@@ -55,8 +55,13 @@ def detect_faults(
     Returns None when the site is stale or unknown: no inference is possible, so the
     caller must skip ``sync_faults`` and leave open faults open.
     """
-    last_update = bundle.site.last_update_time if bundle.site is not None else None
-    if is_stale(last_update, now, stale_after_minutes):
+    if bundle.site is None:
+        return None
+    info = bundle.site
+    if is_stale(
+        info.last_update_time, now, stale_after_minutes,
+        lat=info.lat, lon=info.lon, tz=info.timezone,
+    ):
         return None
 
     found: list[DetectedFault] = []

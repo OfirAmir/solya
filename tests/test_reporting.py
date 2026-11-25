@@ -682,3 +682,19 @@ async def test_failed_site_call_is_no_data_with_retry(h, load_fixture, cards):
         mock_site(load_fixture, FARM)
         await h.reporter.retry_pull_and_report(FARM, DAY)
     assert h.sent("report")[1].text == REGRESSION
+
+
+async def test_late_retry_after_dark_no_false_comm_loss(h, load_fixture):
+    """I2 probe: overview 500, the retry runs 12 min late (lastUpdateTime 16:45, retry
+    17:47 local). No comm-loss alert; the retry report goes out."""
+    await pull_both(h, load_fixture, farm=dict(overview=httpx.Response(500)))
+    await h.reporter.evening_report(1, DAY)
+    (_, at) = h.retries[0]
+    h.clock.set(datetime(2026, 11, 24, 15, 47, tzinfo=timezone.utc))
+    assert h.clock.now() > at
+    with respx.mock:
+        mock_site(load_fixture, FARM)
+        await h.reporter.retry_pull_and_report(FARM, DAY)
+    assert h.sent("comm_loss") == []
+    assert len(h.sent("report")) == 2
+    assert h.sent("report")[1].text == REGRESSION

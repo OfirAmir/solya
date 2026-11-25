@@ -318,7 +318,10 @@ class Reporter:
         if bundle.site is None:  # no fresh /sites answer: nothing new to conclude
             return None
         last_update = bundle.site.last_update_time
-        stale = is_stale(last_update, now, self._settings.stale_after_minutes)
+        stale = is_stale(
+            last_update, now, self._settings.stale_after_minutes,
+            lat=site.lat, lon=site.lon, tz=site.tz,
+        )
         if stale and site.comm_state != "loss":
             site.comm_state = "loss"
             # A site that never reported has no lastUpdateTime: date the loss from the pull.
