@@ -126,3 +126,52 @@ async def test_text_only_allowed_changes(settings, clock, db):
     assert len(diff) == 1 and f1[diff[0]] is not None  # acked_at only
     o0, o1 = before["owners"][0], after["owners"][0]
     assert sum(a != b for a, b in zip(o0, o1)) == 1  # last_inbound_at only
+
+
+def _notified_fault(db):
+    with db() as s:
+        s.add(FaultRecord(site_id=1, key="k", source="x", code="C", first_seen=NOW, notified_at=NOW))
+        s.commit()
+
+
+async def test_start_from_unblocked_owner_reactivates(settings, clock, db):
+    """I9/R27: Telegram's Restart button after unblocking sends /start."""
+    oid = _owner(db, active=False)
+    h = _handlers(settings, clock, db)
+    upd, ctx, msg = _upd(text="/start")
+    await h["start"](upd, ctx)
+    assert "הצטרפת" in msg.reply_text.call_args[0][0]
+    with db() as s:
+        o = s.get(Owner, oid)
+        assert o.active is True and o.last_inbound_at == clock.now()
+
+
+async def test_connect_from_inactive_owner_reactivates_and_links(settings, clock, db):
+    oid = _owner(db, active=False)
+    h = _handlers(settings, clock, db)
+    upd, ctx, msg = _upd(text="/connect")
+    await h["connect"](upd, ctx)
+    assert "https://solya.example/connect/" in msg.reply_text.call_args[0][0]
+    with db() as s:
+        assert s.get(Owner, oid).active is True
+        assert s.query(ConnectRequest).count() == 1
+
+
+async def test_commands_ack_faults(settings, clock, db):
+    """Spec §5.5: any owner message after an alert acknowledges it, commands included."""
+    for command in ("alerts", "today", "help"):
+        with db() as s:
+            s.query(FaultRecord).delete()
+            s.query(Site).delete()
+            s.query(Owner).delete()
+            s.commit()
+        oid = _owner(db, active=False)
+        _notified_fault(db)
+        h = _handlers(settings, clock, db)
+        upd, ctx, msg = _upd(text=f"/{command}")
+        await h[command](upd, ctx)
+        assert msg.reply_text.await_count == 1
+        with db() as s:
+            assert s.query(FaultRecord).one().acked_at == clock.now(), command
+            o = s.get(Owner, oid)
+            assert o.active is True and o.last_inbound_at == clock.now(), command

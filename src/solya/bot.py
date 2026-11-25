@@ -43,11 +43,19 @@ def build_bot_application(token: str, container) -> Application:
     async def reply(update: Update, text: str) -> None:
         await update.effective_message.reply_text(rtl_text(text))
 
+    def known_owner(s, update: Update, now):
+        """R27: every update from a registered owner, commands included, is inbound
+        bookkeeping: last_inbound_at, fault ack and reactivation (R16)."""
+        owner = onboarding.get_owner_by_chat(s, update.effective_chat.id)
+        if owner is not None:
+            onboarding.record_inbound(s, owner, now)
+        return owner
+
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat = update.effective_chat
         now = container.clock.now()
         with session_scope(container.session_factory) as s:
-            owner = onboarding.get_owner_by_chat(s, chat.id)
+            owner = known_owner(s, update, now)
             if owner is None and context.args:
                 owner = onboarding.redeem_invite(
                     s, context.args[0], chat.id, update.effective_user.first_name or "", now
@@ -57,38 +65,40 @@ def build_bot_application(token: str, container) -> Application:
     async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         now = container.clock.now()
         with session_scope(container.session_factory) as s:
-            owner = onboarding.get_owner_by_chat(s, update.effective_chat.id)
+            owner = known_owner(s, update, now)
             url = (
                 onboarding.create_connect_request(s, owner.id, now, container.settings)
-                if owner is not None and owner.active
+                if owner is not None
                 else None
             )
         await reply(update, connect_link(url) if url else NOT_INVITED)
 
     def answer_command(route: answers.Route) -> Handler:
         async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-            await _answer(update, route, ack=False)
+            await _answer(update, route)
 
         handler.__name__ = f"cmd_{route}"
         return handler
 
-    async def _answer(update: Update, route: answers.Route | None, ack: bool) -> None:
+    async def _answer(update: Update, route: answers.Route | None) -> None:
+        """``route`` None means free text, routed by its wording."""
         now = container.clock.now()
         with session_scope(container.session_factory) as s:
-            owner = onboarding.get_owner_by_chat(s, update.effective_chat.id)
+            owner = known_owner(s, update, now)
             if owner is None:
                 text = NOT_INVITED
             else:
-                if ack:
-                    onboarding.record_inbound(s, owner, now)
+                if route is None:
                     route = answers.route_text(update.effective_message.text or "")
                 text = answers.answer_for(route, s, owner, now)
         await reply(update, text)
 
     async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await _answer(update, None, ack=True)
+        await _answer(update, None)
 
     async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        with session_scope(container.session_factory) as s:
+            known_owner(s, update, container.clock.now())
         await reply(update, HELP)
 
     app.add_handler(CommandHandler("start", _safe(start)))
