@@ -169,7 +169,7 @@ These come from the API recon (section 8) and have not been checked against the 
 
 ## Optional AI answers
 
-Off by default (`LLM_ENABLED=false`). When you enable it (`LLM_ENABLED=true`, plus `LLM_API_KEY`, `LLM_MODEL`, optionally `LLM_BASE_URL` and `LLM_MONTHLY_TOKENS_PER_OWNER`), a free-form owner message that matches none of the fixed questions is sent, together with up to 31 days of stored site aggregates (date, site label, kWh, income, communication state, open faults), to the configured provider. No email, phone or token is sent. The answer is dropped in favour of the help text if it contains a number that is not in that data. It cannot change anything.
+Off by default (`LLM_ENABLED=false`). When you enable it (`LLM_ENABLED=true`, plus `LLM_API_KEY`, `LLM_MODEL`, optionally `LLM_BASE_URL` and `LLM_MONTHLY_TOKENS_PER_OWNER`), a free-form owner message that matches none of the fixed questions is sent, together with up to 31 days of stored site aggregates (date, site label, kWh, income, communication state, open faults), to the configured provider. No email, phone or token is sent. The answer is dropped in favour of the help text if it contains a number that is not in that data. It cannot change anything, and a reply that claims an action (cancel, refund, charge, service call, technician) is also replaced by the help text. The number guard does not catch numbers written as words, and small integers are always treated as grounded because dates appear in the data, so treat AI answers as best-effort.
 
 ## Development
 

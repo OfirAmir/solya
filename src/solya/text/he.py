@@ -179,4 +179,3 @@ def reauth_link(name: str, label: str, url: str, local_dt: datetime) -> str:
     )
 
 AI_BUDGET_USED = "התקציב החודשי לתשובות פתוחות נוצל. אני עדיין שולחת את הסיכום וההתראות."
-AI_UNAVAILABLE = "המידע עדיין לא הגיע אלי, אני על זה."

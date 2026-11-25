@@ -15,7 +15,8 @@ from solya.bot import build_bot_application
 from solya.models import DailyMetric, FaultRecord, LlmUsage, Owner, Site
 from solya.services import ai_answers
 from solya.services import onboarding as ob
-from solya.text.he import AI_BUDGET_USED, AI_UNAVAILABLE, HELP
+from solya.text.rtl import rtl_text
+from solya.text.he import AI_BUDGET_USED, HELP, NO_DATA_YET
 
 NOW = datetime(2026, 11, 24, 15, 0, tzinfo=timezone.utc)
 URL = "https://llm.example/v1/chat/completions"
@@ -106,7 +107,11 @@ async def test_ai_answer_uses_context_only(ai_settings, db, owner_id):
     payload = json.loads(body)
     assert payload["max_tokens"] == 300
     assert payload["model"] == "test/model"
-    assert "SN123" in body and "316.99" in body and "כמה הפקתי?" in body
+    msgs = payload["messages"]
+    assert [m["role"] for m in msgs] == ["system", "system", "user"]
+    assert msgs[0]["content"] == ai_answers.SYSTEM
+    assert "SN123" in msgs[1]["content"] and "316.99" in msgs[1]["content"]
+    assert msgs[2]["content"] == "כמה הפקתי?"
     assert req.headers["authorization"] == f"Bearer {KEY}"
     assert KEY not in body
 
@@ -155,10 +160,17 @@ async def test_ai_provider_error_fallback(ai_settings, db, owner_id, caplog, moc
     m = mock()
     respx.post(URL).mock(side_effect=m if isinstance(m, Exception) else None, return_value=m if not isinstance(m, Exception) else None)
     with caplog.at_level(logging.DEBUG):
-        assert await _ask(ai_settings, db, owner_id) == AI_UNAVAILABLE
+        assert await _ask(ai_settings, db, owner_id) == NO_DATA_YET
     assert KEY not in caplog.text
     assert any(r.levelno >= logging.WARNING for r in caplog.records)
     assert not any(r.exc_info for r in caplog.records)
+
+
+@respx.mock
+@pytest.mark.parametrize("stem", ["ביטלתי", "החזר", "נפתח"])
+async def test_ai_action_claim_blocked(ai_settings, db, owner_id, stem):
+    respx.post(URL).mock(return_value=_reply(f"\u200f{stem[:2]}\u200f{stem[2:]} בשבילך"))
+    assert await _ask(ai_settings, db, owner_id) == HELP
 
 
 @respx.mock
@@ -250,5 +262,8 @@ async def test_ai_cannot_change_state(ai_settings, clock, db, owner_id):
     finally:
         await c.http.aclose()
     assert _snap(db) == before
+    sent = msg.reply_text.call_args[0][0]
+    assert "ביטלתי" not in sent and "קריאת שירות" not in sent
+    assert sent == rtl_text(HELP)
     with db() as s:
         assert s.query(Owner).count() == 1
