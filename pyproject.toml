@@ -15,6 +15,9 @@ dependencies = [
     "pillow>=11",
     "astral>=3.2",
     "tzdata",
+    "jinja2",
+    "python-multipart",
+    "itsdangerous",
 ]
 
 [project.optional-dependencies]

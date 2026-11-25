@@ -46,7 +46,10 @@ def make_engine(url: str) -> Engine:
 def init_db(engine: Engine) -> None:
     from solya import models  # noqa: F401  (registers tables on Base)
 
+    from solya import migrate
+
     Base.metadata.create_all(engine)
+    migrate.apply(engine)
 
 
 @contextmanager

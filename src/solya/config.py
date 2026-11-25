@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 from functools import lru_cache
 
 from pydantic import AnyHttpUrl, SecretStr
@@ -33,6 +35,20 @@ class Settings(BaseSettings):
     connect_token_ttl_minutes: int = 15
     ray_implementation: str | None = None
     default_timezone: str = "Asia/Jerusalem"
+    session_secret: SecretStr | None = None
+    admin_password: SecretStr | None = None
+    trusted_proxies: list[str] = ["127.0.0.1"]
+    llm_enabled: bool = False
+    llm_base_url: str = "https://openrouter.ai/api/v1"
+    llm_api_key: SecretStr | None = None
+    llm_model: str | None = None
+    llm_monthly_tokens_per_owner: int = 50000
+
+    def effective_session_secret(self) -> bytes:
+        if self.session_secret is not None:
+            return hashlib.sha256(self.session_secret.get_secret_value().encode()).digest()
+        key = self.token_encryption_key.get_secret_value().encode()
+        return hmac.new(key, b"solya-session", hashlib.sha256).digest()
 
 
 @lru_cache

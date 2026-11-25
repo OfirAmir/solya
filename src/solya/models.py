@@ -1,3 +1,4 @@
+import uuid
 from datetime import date, datetime
 from decimal import Decimal
 
@@ -13,6 +14,7 @@ from sqlalchemy import (
     Numeric,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -24,11 +26,23 @@ class Owner(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     display_name: Mapped[str] = mapped_column(String)
-    telegram_chat_id: Mapped[int] = mapped_column(BigInteger, unique=True)
+    telegram_chat_id: Mapped[int | None] = mapped_column(BigInteger, unique=True, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     locale: Mapped[str] = mapped_column(String, default="he")
     last_inbound_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    email: Mapped[str | None] = mapped_column(String, nullable=True)
+    phone: Mapped[str | None] = mapped_column(String, nullable=True)
+    signup_source: Mapped[str] = mapped_column(
+        String, default="bot", server_default="bot"
+    )  # bot|web
+    link_token: Mapped[str | None] = mapped_column(
+        String, unique=True, index=True, nullable=True
+    )
+    # lead|connected|pending_payment|active; web sign-ups set "lead" explicitly
+    subscription_status: Mapped[str] = mapped_column(
+        String, default="active", server_default="active"
+    )
 
 
 class Invite(Base):
@@ -65,6 +79,10 @@ class Site(Base):
     devices_fetched_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     expected_inverters: Mapped[list[str]] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    monitored: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("1"))
+    call_plan: Mapped[str] = mapped_column(
+        String, default="standard", server_default="standard"
+    )  # standard|low
 
 
 class SiteToken(Base):
@@ -161,3 +179,26 @@ class ApiLedger(Base):
     endpoint: Mapped[str] = mapped_column(String)
     http_status: Mapped[int] = mapped_column(Integer)
     credited: Mapped[bool] = mapped_column(Boolean)
+
+
+class Payment(Base):
+    __tablename__ = "payments"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: uuid.uuid4().hex)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("owners.id"))
+    amount_agorot: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    amount_is_estimate: Mapped[bool] = mapped_column(Boolean, default=False)
+    provider: Mapped[str] = mapped_column(String, default="stub")
+    status: Mapped[str] = mapped_column(String, default="stub_pending")
+    description: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime)
+
+
+class LlmUsage(Base):
+    __tablename__ = "llm_usage"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("owners.id"))
+    ts: Mapped[datetime] = mapped_column(UTCDateTime)
+    input_tokens: Mapped[int] = mapped_column(Integer)
+    output_tokens: Mapped[int] = mapped_column(Integer)
