@@ -16,7 +16,7 @@ from telegram.ext import (
 
 from solya.db import session_scope
 from solya.services import answers, onboarding
-from solya.text.he import HELP, INVITE_OK, NOT_INVITED, connect_link
+from solya.text.he import CHAT_BOUND_ELSEWHERE, HELP, INVITE_OK, NOT_INVITED, connect_link
 from solya.text.rtl import rtl_text
 
 log = logging.getLogger(__name__)
@@ -54,13 +54,28 @@ def build_bot_application(token: str, container) -> Application:
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat = update.effective_chat
         now = container.clock.now()
+        linked_owner_id = None
         with session_scope(container.session_factory) as s:
-            owner = known_owner(s, update, now)
-            if owner is None and context.args:
-                owner = onboarding.redeem_invite(
-                    s, context.args[0], chat.id, update.effective_user.first_name or "", now
-                )
+            payload = context.args[0] if context.args else None
+            outcome = onboarding.link_chat(s, payload, chat.id, now) if payload else "unknown"
+            if outcome == "linked":
+                linked_owner_id = onboarding.get_owner_by_chat(s, chat.id).id
+                owner = True
+            elif outcome == "bound_elsewhere":
+                owner = None
+            else:
+                owner = known_owner(s, update, now)
+                if owner is None and payload:
+                    owner = onboarding.redeem_invite(
+                        s, payload, chat.id, update.effective_user.first_name or "", now
+                    )
+        if outcome == "bound_elsewhere":
+            await reply(update, CHAT_BOUND_ELSEWHERE)
+            return
         await reply(update, INVITE_OK if owner is not None else NOT_INVITED)
+        if linked_owner_id is not None:
+            await container.reporter.on_owner_linked(linked_owner_id)
+            container.scheduler.plan_owner(linked_owner_id)  # tonight's report (Q2)
 
     async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         now = container.clock.now()

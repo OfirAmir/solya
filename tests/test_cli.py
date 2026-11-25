@@ -66,12 +66,17 @@ def test_genkey_valid_fernet(cfg, capsys):
     Fernet(capsys.readouterr().out.strip().encode())
 
 
-def test_invite_create_prints_deeplink(cfg, factory, capsys):
+def test_invite_create_prints_both_links(cfg, factory, capsys):
     assert run(cfg, "invite", "create") == 0
-    url = capsys.readouterr().out.strip()
+    lines = capsys.readouterr().out.strip().splitlines()
     with session_scope(factory) as s:
         token = s.scalars(select(Invite.token)).one()
-    assert url == f"https://t.me/solya_test_bot?start={token}"
+    base = str(cfg.public_base_url).rstrip("/")
+    assert lines == [
+        f"telegram: https://t.me/solya_test_bot?start={token}",
+        f"web: {base}/join/{token}",
+    ]
+    assert "//join" not in lines[1]
 
 
 def test_sites_set_updates(cfg, factory, capsys):

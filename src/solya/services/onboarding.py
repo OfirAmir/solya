@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import secrets
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
@@ -50,6 +51,30 @@ def redeem_invite(
     session.flush()
     _attach_invite(session, token, owner.id)
     return owner
+
+
+def link_chat(
+    session: Session, link_token: str, chat_id: int, now: datetime
+) -> Literal["linked", "bound_elsewhere", "unknown"]:
+    """Bind a web sign-up to the Telegram chat that opened its /start deep link.
+
+    The token is single-use (cleared on success) and never expires (spec 5.6.2). A chat
+    that already belongs to another owner changes nothing."""
+    owner = session.scalar(select(Owner).where(Owner.link_token == link_token))
+    if owner is None:
+        return "unknown"
+    holder = get_owner_by_chat(session, chat_id)
+    if holder is not None and holder.id != owner.id:
+        return "bound_elsewhere"
+    claimed = session.execute(
+        update(Owner)
+        .where(Owner.id == owner.id, Owner.link_token == link_token)
+        .values(telegram_chat_id=chat_id, link_token=None, last_inbound_at=now)
+    ).rowcount
+    if claimed != 1:
+        return "unknown"
+    session.expire(owner)
+    return "linked"
 
 
 def _claim_invite(session: Session, token: str, now: datetime) -> bool:

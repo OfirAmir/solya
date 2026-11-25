@@ -161,6 +161,13 @@ def connect_link(url: str) -> str:
     )
 
 
+CHAT_BOUND_ELSEWHERE = "הצ'אט הזה כבר מחובר לחשבון אחר"
+
+
+def sites_monitored(n: int) -> str:
+    return f"המערכות שלך במעקב: {n}"
+
+
 def site_connected(portal_name: str) -> str:
     return rtl_text(f"המערכת {portal_name} חוברה בהצלחה.")
 

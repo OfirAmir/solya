@@ -13,7 +13,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import inspect, select
+from sqlalchemy import func, inspect, select
 from sqlalchemy.orm import Session
 
 from solya.clock import Clock
@@ -569,6 +569,27 @@ class Reporter:
         await self._send(OutboundMessage(chat, "welcome", he.WELCOME_1, None, f"welcome1:{owner_id}"))
         second = OutboundMessage(chat, "welcome", he.WELCOME_2, None, f"welcome2:{owner_id}")
         self._delay_send(WELCOME_2_DELAY_SECONDS, lambda: self._send(second))
+
+    async def on_owner_linked(self, owner_id: int) -> None:
+        """A web sign-up just linked its Telegram chat: welcome pair plus the monitored
+        count. Dedupe keys make a retried /start a no-op. Unnotified open faults are
+        left to the next pull's normal path (spec 5.6.1)."""
+        with session_scope(self._sf) as s:
+            owner = s.get(Owner, owner_id)
+            chat = owner_chat(owner) if owner is not None else None
+            monitored = (
+                s.scalar(select(func.count()).select_from(Site).where(
+                    Site.owner_id == owner_id, Site.monitored.is_(True)))
+                if chat is not None else 0
+            )
+        if chat is None:
+            return
+        await self._send(OutboundMessage(chat, "welcome", he.WELCOME_1, None, f"welcome1:{owner_id}"))
+        second = OutboundMessage(chat, "welcome", he.WELCOME_2, None, f"welcome2:{owner_id}")
+        self._delay_send(WELCOME_2_DELAY_SECONDS, lambda: self._send(second))
+        if monitored:
+            await self._send(OutboundMessage(
+                chat, "welcome", he.sites_monitored(monitored), None, f"monitored:{owner_id}"))
 
     # -------------------------------------------------------------- delivery
 

@@ -103,7 +103,8 @@ def cmd_genkey(args, settings: Settings | None, clock: Clock) -> int:
 def cmd_invite_create(args, settings: Settings, clock: Clock) -> int:
     with _session(settings) as s:
         token = onboarding.create_invite(s, "cli", clock.now())
-    print(f"https://t.me/{settings.telegram_bot_username}?start={token}")
+    print(f"telegram: https://t.me/{settings.telegram_bot_username}?start={token}")
+    print(f"web: {str(settings.public_base_url).rstrip('/')}/join/{token}")
     return 0
 
 
@@ -411,7 +412,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("genkey", help="print a new Fernet key").set_defaults(fn=cmd_genkey)
 
     inv = sub.add_parser("invite", help="invite links").add_subparsers(dest="sub", required=True)
-    inv.add_parser("create", help="print a Telegram invite link").set_defaults(fn=cmd_invite_create)
+    inv.add_parser("create", help="print the Telegram and web invite links").set_defaults(fn=cmd_invite_create)
 
     own = sub.add_parser("owners", help="owners").add_subparsers(dest="sub", required=True)
     own.add_parser("list").set_defaults(fn=cmd_owners_list)

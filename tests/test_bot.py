@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 from sqlalchemy import inspect, text
 
@@ -175,3 +175,105 @@ async def test_commands_ack_faults(settings, clock, db):
             assert s.query(FaultRecord).one().acked_at == clock.now(), command
             o = s.get(Owner, oid)
             assert o.active is True and o.last_inbound_at == clock.now(), command
+
+
+# --- web sign-up linking ----------------------------------------------------
+
+
+def _web_owner(db, token="linktok", monitored_sites=1):
+    with db() as s:
+        o = Owner(display_name="Web", signup_source="web", link_token=token, active=True,
+                  created_at=NOW)
+        s.add(o)
+        s.flush()
+        for i in range(monitored_sites):
+            s.add(Site(se_site_id=900 + i, owner_id=o.id, portal_name="P", tz="Asia/Jerusalem",
+                       created_at=NOW))
+        s.commit()
+        return o.id
+
+
+def _linking(settings, clock, db, fake_channel):
+    from conftest import FakeChannel  # noqa: F401
+    from solya.messaging.outbox import Outbox
+    from solya.rules.ray import NullRay
+    from solya.services.reporting import Reporter
+
+    delayed = []
+    reporter = Reporter(
+        db, None, None, Outbox(db, clock), fake_channel, clock, settings, NullRay(),
+        lambda sid, at: None,
+        delay_send=lambda seconds, factory: delayed.append((seconds, factory)),
+    )
+    scheduler = MagicMock()
+    container = SimpleNamespace(settings=settings, session_factory=db, clock=clock,
+                                reporter=reporter, scheduler=scheduler)
+    app = build_bot_application("123456:test-bot-token", container)
+    h = {c: x.callback for x in app.handlers[0] for c in getattr(x, "commands", [])}
+    return h, scheduler, delayed
+
+
+async def test_start_link_token_links_and_welcomes(settings, clock, db, fake_channel):
+    from solya.text import he
+    from solya.text.rtl import rtl_text
+
+    oid = _web_owner(db, monitored_sites=2)
+    h, scheduler, delayed = _linking(settings, clock, db, fake_channel)
+    upd, ctx, msg = _upd(chat=77, args=["linktok"])
+    await h["start"](upd, ctx)
+    with db() as s:
+        o = s.get(Owner, oid)
+        assert o.telegram_chat_id == 77 and o.link_token is None
+        assert o.last_inbound_at is not None
+    texts = [m.text for m in fake_channel.sent]
+    assert rtl_text(he.WELCOME_1) in texts
+    assert rtl_text(he.sites_monitored(2)) in texts
+    assert [m.dedupe_key for m in fake_channel.sent] == [f"welcome1:{oid}", f"monitored:{oid}"]
+    assert len(delayed) == 1 and delayed[0][0] == 60
+    await delayed[0][1]()
+    assert fake_channel.sent[-1].dedupe_key == f"welcome2:{oid}"
+    scheduler.plan_owner.assert_called_once_with(oid)
+
+
+async def test_start_link_token_single_use(settings, clock, db, fake_channel):
+    oid = _web_owner(db)
+    h, scheduler, _ = _linking(settings, clock, db, fake_channel)
+    upd, ctx, _m = _upd(chat=77, args=["linktok"])
+    await h["start"](upd, ctx)
+    sent = len(fake_channel.sent)
+    upd2, ctx2, msg2 = _upd(chat=88, args=["linktok"])
+    await h["start"](upd2, ctx2)
+    assert "בהזמנה בלבד" in msg2.reply_text.call_args[0][0]
+    with db() as s:
+        assert s.get(Owner, oid).telegram_chat_id == 77
+    assert len(fake_channel.sent) == sent
+    scheduler.plan_owner.assert_called_once()
+
+
+async def test_start_bound_elsewhere_changes_nothing(settings, clock, db, fake_channel):
+    other = _owner(db, chat=5)
+    oid = _web_owner(db)
+    h, scheduler, delayed = _linking(settings, clock, db, fake_channel)
+    upd, ctx, msg = _upd(chat=5, args=["linktok"])
+    await h["start"](upd, ctx)
+    assert "כבר מחובר לחשבון אחר" in msg.reply_text.call_args[0][0]
+    with db() as s:
+        o = s.get(Owner, oid)
+        assert o.telegram_chat_id is None and o.link_token == "linktok"
+        assert s.get(Owner, other).telegram_chat_id == 5
+    assert fake_channel.sent == [] and delayed == []
+    scheduler.plan_owner.assert_not_called()
+
+
+async def test_start_invite_still_works(settings, clock, db, fake_channel):
+    h, scheduler, _ = _linking(settings, clock, db, fake_channel)
+    with db() as s:
+        tok = ob.create_invite(s, "admin", NOW)
+        s.commit()
+    upd, ctx, msg = _upd(chat=9, args=[tok])
+    await h["start"](upd, ctx)
+    assert "הצטרפת" in msg.reply_text.call_args[0][0]
+    with db() as s:
+        assert s.query(Owner).filter_by(telegram_chat_id=9).count() == 1
+    scheduler.plan_owner.assert_not_called()
+    assert fake_channel.sent == []
