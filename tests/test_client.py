@@ -156,3 +156,17 @@ async def test_budget_exceeded_no_http(make_client, db, clock):
             await make_client.get_site(SITE)
     assert not route.called
     assert make_client.budget.call_lock.locked() is False
+
+
+async def test_site_body_allowlisted_before_store(make_client, db, load_fixture):
+    raw = load_fixture("solaredge/site_farm.json")
+    with respx.mock:
+        respx.get(f"{BASE}/sites/{SITE}").mock(return_value=httpx.Response(200, json=raw))
+        info = await make_client.get_site(SITE)
+    assert info.timezone
+    body = raws(db)[0].body
+    assert set(body) <= {"siteId", "name", "peakPower", "lastUpdateTime", "activationStatus", "location"}
+    assert set(body.get("location", {})) <= {"timezone", "latitude", "longitude"}
+    dumped = str(body)
+    for key in ("email", "accountId", "address", "city"):
+        assert key not in dumped

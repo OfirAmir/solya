@@ -58,7 +58,7 @@ async def pull_site(
             return await fn()
         except AuthExpired:
             raise
-        except SolarEdgeError as exc:
+        except (SolarEdgeError, KeyError, ValueError, TypeError) as exc:
             errors[name] = f"{type(exc).__name__}: {exc}"
             log.warning("site %s %s call failed: %s", site_id, name, type(exc).__name__)
             return None

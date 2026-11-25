@@ -123,3 +123,13 @@ async def test_auth_expired_aborts(client, db, clock, load_fixture):
         with pytest.raises(AuthExpired):
             await pull_site(client, db, clock, SITE, "evening", DAY)
     assert not r["alerts"].called
+
+
+async def test_malformed_overview_recorded_not_fatal(client, db, clock, load_fixture):
+    bad = load_fixture("solaredge/overview_farm_20261124.json")
+    bad["siteId"] = 999
+    with respx.mock:
+        mock_all(load_fixture, overview=httpx.Response(200, json=bad))
+        b = await pull_site(client, db, clock, SITE, "evening", DAY)
+    assert "overview" in b.errors and b.overview is None
+    assert b.alerts is not None

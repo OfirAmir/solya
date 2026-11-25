@@ -59,6 +59,18 @@ def _json_or_none(resp: httpx.Response) -> Any:
         return None
 
 
+SITE_FIELDS = ("siteId", "name", "peakPower", "lastUpdateTime", "activationStatus")
+LOCATION_FIELDS = ("timezone", "latitude", "longitude")
+
+
+def _allowlist_site(body: dict) -> dict:
+    out = {k: body[k] for k in SITE_FIELDS if k in body}
+    loc = body.get("location")
+    if isinstance(loc, dict):
+        out["location"] = {k: loc[k] for k in LOCATION_FIELDS if k in loc}
+    return out
+
+
 class SolarEdgeClient:
     def __init__(
         self,
@@ -100,6 +112,8 @@ class SolarEdgeClient:
                     raise ApiError(0, f"{type(exc).__name__} calling {path}") from None
                 status = resp.status_code
                 body = _json_or_none(resp)
+                if path == f"/sites/{site_id}" and isinstance(body, dict):
+                    body = _allowlist_site(body)
                 self._budget.record(site_id, path, status, 200 <= status < 300)
                 self._store_raw(site_id, path, params, status, body)
             if status == 401:
