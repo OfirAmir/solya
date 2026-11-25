@@ -658,3 +658,27 @@ async def test_two_sites_recover_on_separate_retries(h, load_fixture):
     ]
     assert "בית: המידע עדיין לא הגיע אלי, אני על זה." in reports[1].text
     assert reports[2].text == REGRESSION
+
+
+async def test_failed_site_call_is_no_data_with_retry(h, load_fixture, cards):
+    """I1: /sites failing (overview fine) means unknown freshness: no_data and a retry,
+    never a comm_loss day built from yesterday's lastUpdateTime."""
+    with session_scope(h.db) as s:  # what the previous evening's pull left behind
+        s.get(Site, FARM).last_update_time = NOW - timedelta(hours=24)
+    await pull_both(h, load_fixture, farm=dict(site=httpx.Response(503)))
+    with session_scope(h.db) as s:
+        row = s.get(DailyMetric, (FARM, DAY))
+        assert row.comm_state == "no_data" and row.production_wh is None
+        assert s.get(Site, FARM).comm_state == "ok"
+    assert [sid for sid, _ in h.retries] == [FARM]
+    assert h.sent("comm_loss") == []
+
+    await h.reporter.evening_report(1, DAY)
+    (report,) = h.sent("report")
+    assert report.text.split("\n")[1] == "משק: המידע עדיין לא הגיע אלי, אני על זה."
+
+    h.clock.set(h.retries[0][1])
+    with respx.mock:
+        mock_site(load_fixture, FARM)
+        await h.reporter.retry_pull_and_report(FARM, DAY)
+    assert h.sent("report")[1].text == REGRESSION

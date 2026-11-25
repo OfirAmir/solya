@@ -90,8 +90,13 @@ def compute_site_day(
         day.state = "reauth_needed"
         return day
 
+    if bundle is not None and bundle.site is None:
+        # No fresh /sites answer: freshness is unknown, not stale. The stored
+        # lastUpdateTime is from an earlier pull, so judging it would fake a comm loss.
+        day.state = "no_data"
+        return day
     last_update = site.last_update_time
-    if bundle is not None and bundle.site is not None:
+    if bundle is not None:
         last_update = bundle.site.last_update_time
     if is_stale(last_update, now, settings.stale_after_minutes):
         day.state = "comm_loss"
