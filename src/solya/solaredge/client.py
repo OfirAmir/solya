@@ -100,23 +100,8 @@ class SolarEdgeClient:
         while True:
             # Token first (it may take the call lock itself on refresh), then the lock.
             token = await self._tokens.get_access_token(site_id)
-            async with self._budget.call_lock:
-                await self._budget.acquire(site_id, path, priority)
-                try:
-                    resp = await self._http.get(
-                        self._settings.se_api_base + path,
-                        params=params,
-                        headers={"Authorization": f"Bearer {token}"},
-                    )
-                except httpx.HTTPError as exc:
-                    self._budget.record(site_id, path, 0, False)
-                    raise ApiError(0, f"{type(exc).__name__} calling {path}") from None
-                status = resp.status_code
-                body = _json_or_none(resp)
-                if path == f"/sites/{site_id}" and isinstance(body, dict):
-                    body = _allowlist_site(body)
-                self._budget.record(site_id, path, status, 200 <= status < 300)
-                self._store_raw(site_id, path, params, status, body)
+            resp, body = await self._send(site_id, path, params, priority, token)
+            status = resp.status_code
             if status == 401:
                 if not refreshed:
                     refreshed = True
@@ -133,6 +118,38 @@ class SolarEdgeClient:
                 rate_retried = True
                 log.info("429 on %s; retrying once in %.1f s", path, delay)
                 await self._budget.sleep(delay)
+
+    async def _send(
+        self, site_id: int, path: str, params: Params, priority: Priority, token: str
+    ) -> tuple[httpx.Response, Any]:
+        """One budgeted GET under call_lock: acquire, HTTP, ledger record, raw row (R9)."""
+        async with self._budget.call_lock:
+            await self._budget.acquire(site_id, path, priority)
+            try:
+                resp = await self._http.get(
+                    self._settings.se_api_base + path,
+                    params=params,
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+            except httpx.HTTPError as exc:
+                self._budget.record(site_id, path, 0, False)
+                raise ApiError(0, f"{type(exc).__name__} calling {path}") from None
+            status = resp.status_code
+            body = _json_or_none(resp)
+            if path == f"/sites/{site_id}" and isinstance(body, dict):
+                body = _allowlist_site(body)
+            self._budget.record(site_id, path, status, 200 <= status < 300)
+            self._store_raw(site_id, path, params, status, body)
+        return resp, body
+
+    async def verify_site_access(self, site_id: int, access_token: str) -> SiteInfo:
+        """GET /sites/{site_id} with an explicit, not-yet-stored bearer token: proof that a
+        fresh grant can read this site. One attempt, no refresh or retry. Raises on any
+        non-2xx answer (403 PermissionDenied, 404 NotFound, ...)."""
+        path = f"/sites/{site_id}"
+        resp, body = await self._send(site_id, path, [], "essential", access_token)
+        j = self._check(resp, path, body)
+        return parse_site(j, self._settings.default_timezone)
 
     def _store_raw(self, site_id: int, path: str, params: Params, status: int, body: Any) -> None:
         with session_scope(self._factory) as s:

@@ -93,18 +93,30 @@ async def oauth_callback(
         return _html(INVALID_LINK, 400)
     try:
         pair = await exchange_code(c.http, c.settings, code)
+        # M4: prove the new grant can read site_id before anything is stored. SolarEdge's
+        # answer is the authority; the site_id query parameter is user-editable.
+        info = await c.client.verify_site_access(site_id, pair.access_token)
+    except Exception as e:
+        log.error("oauth callback refused: code exchange or site access check failed: %s",
+                  type(e).__name__)
+        return _html(FAILED, 502)
+    if info.site_id != site_id:
+        return _callback_failed(request, "granted site does not match site_id")
+    try:
+        # A site owned by someone else moves only because SolarEdge just proved this
+        # grant can read it; the admin is told below (M4).
+        with session_scope(c.session_factory) as s:
+            existing = s.get(Site, site_id)
+            previous_owner = existing.owner_id if existing is not None else None
         c.tokens.store_new_grant(site_id, pair)
-        info = await c.client.get_site(site_id)
         with session_scope(c.session_factory) as s:
             req = s.get(onboarding.ConnectRequest, token)
-            existing = s.get(Site, info.site_id)
-            previous_owner = existing.owner_id if existing is not None else None
             site, is_first = onboarding.register_site(s, req, info, c.clock.now())
             sid, new_owner = site.se_site_id, site.owner_id
         await c.reporter.on_site_connected(sid, is_first)
         if previous_owner is not None and previous_owner != new_owner:
             await c.reporter.on_site_reassigned(sid, previous_owner, new_owner)
     except Exception as e:
-        log.error("oauth callback failed after code exchange: %s", type(e).__name__)
+        log.error("oauth callback failed after the site access check: %s", type(e).__name__)
         return _html(FAILED, 502)
     return _html(CONNECTED)

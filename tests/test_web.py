@@ -251,3 +251,105 @@ def test_callback_reassigning_site_notifies_admin(env, load_fixture):
     assert len(admin) == 1
     assert str(SITE_ID) in admin[0].text and str(other_id) in admin[0].text
     assert admin[0].text.startswith("האתר")
+
+
+def _seed_victim_site(container):
+    """Another owner's connected site, with its own stored tokens."""
+    from solya.solaredge.oauth import TokenPair
+
+    with session_scope(container.session_factory) as s:
+        other = Owner(display_name="Victim", telegram_chat_id=777, active=True,
+                      created_at=container.clock.now())
+        s.add(other)
+        s.flush()
+        s.add(Site(se_site_id=SITE_ID, owner_id=other.id, portal_name="victim",
+                   tz="Asia/Jerusalem", created_at=container.clock.now()))
+        other_id = other.id
+    container.tokens.store_new_grant(SITE_ID, TokenPair("VICTIM-ACCESS", "VICTIM-REFRESH", 3600))
+    with session_scope(container.session_factory) as s:
+        row = s.get(SiteToken, SITE_ID)
+        before = (row.access_enc, row.refresh_enc, row.authorized_at)
+    return other_id, before
+
+
+def _assert_victim_untouched(container, other_id, before):
+    with session_scope(container.session_factory) as s:
+        row = s.get(SiteToken, SITE_ID)
+        assert (row.access_enc, row.refresh_enc, row.authorized_at) == before
+        assert container.cipher.decrypt(row.access_enc) == "VICTIM-ACCESS"
+        assert container.cipher.decrypt(row.refresh_enc) == "VICTIM-REFRESH"
+        site = s.get(Site, SITE_ID)
+        assert site.owner_id == other_id and site.portal_name == "victim"
+
+
+@respx.mock
+def test_callback_token_without_site_access_stores_nothing(env, caplog):
+    """M4: an edited site_id the new token cannot read (403) changes no stored token."""
+    tc, container, channel, token = env
+    other_id, before = _seed_victim_site(container)
+    _mock_se({})
+    route = respx.get(f"https://monitoringapi.solaredge.com/v2/sites/{SITE_ID}").mock(
+        return_value=httpx.Response(403, json={"message": "forbidden"})
+    )
+    nonce = _nonce(container, token)
+    with caplog.at_level(logging.DEBUG):
+        r = tc.get("/oauth/callback", params={"code": CODE, "site_id": SITE_ID, "state": nonce})
+    assert r.status_code == 502 and 'dir="rtl"' in r.text
+    assert route.call_count == 1
+    assert route.calls[0].request.headers["authorization"] == f"Bearer {ACCESS}"
+    _assert_victim_untouched(container, other_id, before)
+    with session_scope(container.session_factory) as s:
+        assert s.get(ConnectRequest, token).used_at is None
+    assert channel.sent == []
+    blob = " ".join(rec.getMessage() for rec in caplog.records if rec.name.startswith("solya"))
+    for secret in (CODE, ACCESS, REFRESH, nonce):
+        assert secret not in blob
+
+
+@respx.mock
+def test_callback_site_id_mismatch_stores_nothing(env, load_fixture):
+    """M4: SolarEdge answering for a different siteId is refused the same way."""
+    tc, container, channel, token = env
+    other_id, before = _seed_victim_site(container)
+    body = load_fixture("solaredge/site_home.json")
+    body["siteId"] = SITE_ID + 1
+    _mock_se(body)
+    nonce = _nonce(container, token)
+    r = tc.get("/oauth/callback", params={"code": CODE, "site_id": SITE_ID, "state": nonce})
+    assert r.status_code in (400, 502) and 'dir="rtl"' in r.text
+    _assert_victim_untouched(container, other_id, before)
+    with session_scope(container.session_factory) as s:
+        assert s.get(SiteToken, SITE_ID + 1) is None
+        assert s.get(Site, SITE_ID + 1) is None
+    assert channel.sent == []
+
+
+@respx.mock
+def test_callback_new_site_403_creates_no_token_row(env):
+    tc, container, channel, token = env
+    _mock_se({})
+    respx.get(f"https://monitoringapi.solaredge.com/v2/sites/{SITE_ID}").mock(
+        return_value=httpx.Response(403)
+    )
+    nonce = _nonce(container, token)
+    r = tc.get("/oauth/callback", params={"code": CODE, "site_id": SITE_ID, "state": nonce})
+    assert r.status_code == 502
+    with session_scope(container.session_factory) as s:
+        assert s.get(SiteToken, SITE_ID) is None and s.get(Site, SITE_ID) is None
+
+
+@respx.mock
+def test_callback_happy_path_one_budgeted_site_call(env, load_fixture):
+    """The access check is the only /sites call, and it goes through the budget ledger."""
+    from solya.models import ApiLedger
+
+    tc, container, channel, token = env
+    _mock_se(load_fixture("solaredge/site_home.json"))
+    nonce = _nonce(container, token)
+    r = tc.get("/oauth/callback", params={"code": CODE, "site_id": SITE_ID, "state": nonce})
+    assert r.status_code == 200
+    site_calls = [c for c in respx.calls if c.request.url.path.startswith("/v2/sites")]
+    assert len(site_calls) == 1
+    with session_scope(container.session_factory) as s:
+        rows = s.scalars(select(ApiLedger).where(ApiLedger.endpoint == f"/sites/{SITE_ID}")).all()
+        assert len(rows) == 1 and rows[0].credited and rows[0].site_id == SITE_ID
