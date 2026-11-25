@@ -141,3 +141,14 @@ async def test_labels_count_only_monitored_sites(c, load_fixture):
     reauth = [m for m in sent(c, "reply") if m.dedupe_key.startswith("reauth:")]
     assert len(reauth) == 1
     assert "עבור המערכת " in reauth[0].text and "אורן סופר" not in reauth[0].text
+
+
+def test_switch_to_low_reports_once_by_print_not_log(cfg, factory, capsys, caplog):
+    """The CLI configures no logging, so the count is printed and not also logged."""
+    seed_sites(factory)
+    with session_scope(factory) as s:
+        s.add(FaultRecord(site_id=FARM, key="mode:S1", source="mode", code="C", first_seen=FETCHED))
+    caplog.set_level(logging.INFO)
+    assert run(cfg, "sites", "set", "--site", str(FARM), "--call-plan", "low") == 0
+    assert capsys.readouterr().out.count("closed 1 inverter faults (low plan)") == 1
+    assert "inverter faults" not in caplog.text

@@ -5,7 +5,6 @@ import argparse
 import asyncio
 import dataclasses
 import json
-import logging
 import re
 import sys
 from contextlib import contextmanager
@@ -39,7 +38,6 @@ from solya.solaredge.parse import (
 USD_PER_CREDIT = 0.005
 CREDITS_WINDOW = timedelta(days=30)
 HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
-log = logging.getLogger(__name__)
 
 
 class CliError(Exception):
@@ -166,7 +164,6 @@ def _close_inverter_faults(s, site_id: int, now: datetime) -> None:
             rec.closed_at = now
             closed += 1
     print(f"closed {closed} inverter faults (low plan)")
-    log.info("site %s: closed %d inverter faults (low plan)", site_id, closed)
 
 
 def cmd_sites_set(args, settings: Settings, clock: Clock) -> int:
