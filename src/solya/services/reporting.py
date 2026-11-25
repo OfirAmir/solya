@@ -218,10 +218,27 @@ class Reporter:
     # ------------------------------------------------------------------ pulls
 
     async def evening_pull(self, site_id: int, local_date: date | None = None) -> None:
-        await self._pull_and_process(site_id, "evening", local_date)
+        if self._scheduled_pull_allowed(site_id, "evening"):
+            await self._pull_and_process(site_id, "evening", local_date)
 
     async def midday_check(self, site_id: int) -> None:
-        await self._pull_and_process(site_id, "midday", None)
+        if self._scheduled_pull_allowed(site_id, "midday"):
+            await self._pull_and_process(site_id, "midday", None)
+
+    def _scheduled_pull_allowed(self, site_id: int, kind: str) -> bool:
+        """The site is re-read at run time: it may have been unmonitored, or moved to the
+        low plan, after the job was planned. A manual pull does not come through here."""
+        with session_scope(self._sf) as s:
+            site = s.get(Site, site_id)
+            if site is None:
+                return True  # _pull_and_process reports the unknown site
+            if not site.monitored:
+                log.info("skip_unmonitored: %s pull for site %s not run", kind, site_id)
+                return False
+            if kind == "midday" and site.call_plan == "low":
+                log.info("%s pull skipped for site %s (low call plan)", kind, site_id)
+                return False
+        return True
 
     async def manual_pull(self, site_id: int, kind: str, notify: bool = False) -> PullBundle | None:
         """R25: the admin ``pull`` command. The same pipeline as the scheduled pulls
@@ -244,13 +261,16 @@ class Reporter:
                 log.info("%s pull skipped for site %s (status %s)", kind, site_id, site.status)
                 return None
             tz = site.tz
+            call_plan = site.call_plan
             # R1: the evening status window covers the whole daylight period.
             daylight = True if kind == "evening" else is_daylight(site, now)
         if local_date is None:
             local_date = now.astimezone(ZoneInfo(tz)).date()
 
         try:
-            bundle = await pull_site(self._client, self._sf, self._clock, site_id, kind, local_date)
+            bundle = await pull_site(
+                self._client, self._sf, self._clock, site_id, kind, local_date, call_plan
+            )
         except AuthExpired:
             log.warning("site %s needs re-authorization; %s pull skipped", site_id, kind)
             return None
@@ -287,7 +307,7 @@ class Reporter:
         with session_scope(self._sf) as s:
             site = s.get(Site, site_id)
             owner = s.get(Owner, site.owner_id)
-            count = len(_owner_sites(s, owner.id))
+            count = len(_owner_sites(s, owner.id, monitored_only=True))
             label = effective_label(site, count)
             tz = ZoneInfo(site.tz)
             local_now = now.astimezone(tz)
@@ -492,7 +512,7 @@ class Reporter:
             if owner is not None and owner.telegram_chat_id is None:
                 _skip_unlinked(f"reauth link for site {site_id}", owner.id)
             if chat is not None:
-                label = effective_label(site, len(_owner_sites(s, owner.id)))
+                label = effective_label(site, len(_owner_sites(s, owner.id, monitored_only=True)))
                 url = create_connect_request(s, owner.id, now, self._settings)
                 owner_msg = OutboundMessage(
                     chat, "reply",

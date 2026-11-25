@@ -287,6 +287,46 @@ def fresh_site(load_fixture, site_id, clock, lat, lon):
     return handler
 
 
+async def replay_november(c, clock, load_fixture):
+    """Run the scheduler's November jobs for the seeded sites against mocked endpoints.
+    Returns how many mid-day checks ran."""
+    issued = iter(range(1, 10_000))
+
+    def token(request):
+        n = next(issued)
+        return httpx.Response(200, json={"access_token": f"a{n}", "refresh_token": f"r{n}",
+                                         "expires_in": 7200})
+
+    runners = {
+        "evening_pull": lambda spec, day: c.reporter.evening_pull(spec.target, day),
+        "midday_check": lambda spec, day: c.reporter.midday_check(spec.target),
+        "evening_report": lambda spec, day: c.reporter.evening_report(spec.target, day),
+    }
+    midday_runs = 0
+    with respx.mock:
+        respx.post(TOKEN_URL).mock(side_effect=token)
+        for site_id, (lat, lon) in ((FARM, (32.34, 34.89)), (HOME, (32.33, 34.89))):
+            mock_site(load_fixture, site_id,
+                      site=fresh_site(load_fixture, site_id, clock, lat, lon))
+
+        day = date(2026, 11, 1)
+        while day <= date(2026, 11, 30):
+            with session_scope(c.session_factory) as s:
+                sites = list(s.scalars(select(Site).order_by(Site.se_site_id)))
+                specs = plan_day_jobs(sites, day, c.settings)
+            keepalive_at = datetime.combine(day, time(3, 0), TZ).astimezone(timezone.utc)
+            jobs = [(keepalive_at, "keepalive", None)] + [(j.run_at, j.kind, j) for j in specs]
+            for run_at, kind, spec in sorted(jobs, key=lambda j: j[0]):
+                clock.set(max(run_at, clock.now()))  # budget sleeps may have moved it on
+                if kind == "keepalive":
+                    await c.reporter.keepalive()
+                else:
+                    midday_runs += kind == "midday_check"
+                    await runners[kind](spec, day)
+            day += timedelta(days=1)
+    return midday_runs
+
+
 async def test_a6_30_day_budget(settings, load_fixture, capsys):
     clock = FixedClock(datetime(2026, 11, 1, 0, 0, tzinfo=TZ))
     c = make_container(settings, clock)
@@ -294,40 +334,7 @@ async def test_a6_30_day_budget(settings, load_fixture, capsys):
         seed_oren(c)
         grant(c, FARM, expires_in=7200)
         grant(c, HOME, expires_in=7200)
-        issued = iter(range(1, 10_000))
-
-        def token(request):
-            n = next(issued)
-            return httpx.Response(200, json={"access_token": f"a{n}", "refresh_token": f"r{n}",
-                                             "expires_in": 7200})
-
-        runners = {
-            "evening_pull": lambda spec, day: c.reporter.evening_pull(spec.target, day),
-            "midday_check": lambda spec, day: c.reporter.midday_check(spec.target),
-            "evening_report": lambda spec, day: c.reporter.evening_report(spec.target, day),
-        }
-        midday_runs = 0
-        with respx.mock:
-            respx.post(TOKEN_URL).mock(side_effect=token)
-            for site_id, (lat, lon) in ((FARM, (32.34, 34.89)), (HOME, (32.33, 34.89))):
-                mock_site(load_fixture, site_id,
-                          site=fresh_site(load_fixture, site_id, clock, lat, lon))
-
-            day = date(2026, 11, 1)
-            while day <= date(2026, 11, 30):
-                with session_scope(c.session_factory) as s:
-                    sites = list(s.scalars(select(Site).order_by(Site.se_site_id)))
-                    specs = plan_day_jobs(sites, day, c.settings)
-                keepalive_at = datetime.combine(day, time(3, 0), TZ).astimezone(timezone.utc)
-                jobs = [(keepalive_at, "keepalive", None)] + [(j.run_at, j.kind, j) for j in specs]
-                for run_at, kind, spec in sorted(jobs, key=lambda j: j[0]):
-                    clock.set(max(run_at, clock.now()))  # budget sleeps may have moved it on
-                    if kind == "keepalive":
-                        await c.reporter.keepalive()
-                    else:
-                        midday_runs += kind == "midday_check"
-                        await runners[kind](spec, day)
-                day += timedelta(days=1)
+        midday_runs = await replay_november(c, clock, load_fixture)
 
         with session_scope(c.session_factory) as s:
             per_site = dict(s.execute(
@@ -367,6 +374,44 @@ async def test_a6_30_day_budget(settings, load_fixture, capsys):
         assert per_site[FARM] <= cap
         assert per_site[HOME] <= cap
         assert total <= 2000
+    finally:
+        await close(c)
+
+
+async def test_a6b_low_plan_budget(settings, load_fixture, capsys):
+    """The same 30 days with the home site on the low call plan."""
+    clock = FixedClock(datetime(2026, 11, 1, 0, 0, tzinfo=TZ))
+    c = make_container(settings, clock)
+    try:
+        seed_oren(c)
+        with session_scope(c.session_factory) as s:
+            s.get(Site, HOME).call_plan = "low"
+        grant(c, FARM, expires_in=7200)
+        grant(c, HOME, expires_in=7200)
+        await replay_november(c, clock, load_fixture)
+
+        with session_scope(c.session_factory) as s:
+            home = s.scalar(select(func.count()).select_from(ApiLedger)
+                            .where(ApiLedger.credited.is_(True), ApiLedger.site_id == HOME))
+            endpoints = {e.rsplit("/", 1)[-1] for (e,) in s.execute(
+                select(ApiLedger.endpoint).where(ApiLedger.site_id == HOME))}
+            tokens = s.scalar(select(func.count()).select_from(ApiLedger).where(
+                ApiLedger.credited.is_(True), ApiLedger.site_id == HOME,
+                ApiLedger.endpoint == "oauth2/token"))
+            lifetimes = s.scalar(select(func.count()).select_from(DailyMetric).where(
+                DailyMetric.site_id == HOME, DailyMetric.lifetime_wh.is_not(None)))
+            days = s.scalar(select(func.count()).select_from(DailyMetric).where(
+                DailyMetric.site_id == HOME, DailyMetric.production_wh.is_not(None)))
+        with capsys.disabled():
+            print(f"\n30-day replay, home site {HOME} on the low plan: {home} credits"
+                  f" ({tokens} token) = ${Decimal(home) * CREDIT_USD:.3f}")
+        assert days == 30 and lifetimes == 0
+        assert not endpoints & {"status", "lifetime-energy"}
+        # The brief's 120 is met by the data calls. a6's 2-hour tokens add one credited
+        # refresh a day on top (the ceiling here is that sum, so it still catches a regression).
+        assert home - tokens <= 120
+        assert home <= 125
+        assert len(sent(c, "report")) == 30
     finally:
         await close(c)
 

@@ -46,7 +46,10 @@ async def pull_site(
     site_id: int,
     kind: Literal["evening", "midday"],
     local_date: date,
+    call_plan: str = "standard",
 ) -> PullBundle:
+    """``call_plan`` "low" calls only /sites/{id}, /overview and /alerts (devices only
+    when stale): ``inverters`` and ``lifetime`` stay None, which is not an error."""
     pulled_at = clock.now()
     priority: Priority = "optional" if kind == "midday" else "essential"
     errors: dict[str, str] = {}
@@ -83,8 +86,9 @@ async def pull_site(
     )
     alerts = await call("alerts", lambda: client.get_open_alerts(site_id, tz, priority=priority))
 
+    low = call_plan == "low"
     midnight = datetime.combine(local_date, time.min, tzinfo=ZoneInfo(tz))
-    inverters = await call(
+    inverters = None if low else await call(
         "inverters",
         lambda: client.get_inverter_status(
             site_id, tz, midnight, pulled_at, priority=priority
@@ -92,7 +96,7 @@ async def pull_site(
     )
 
     lifetime = None
-    if kind == "evening":
+    if kind == "evening" and not low:
         lifetime = await call(
             "lifetime", lambda: client.get_lifetime(site_id, tz, priority=priority)
         )

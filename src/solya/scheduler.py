@@ -62,7 +62,7 @@ def _check_time(local_date: date, hhmm: str, tz: str) -> datetime:
 def plan_day_jobs(
     sites: list[Site], local_date: date, settings: Settings, linked_owners: set[int] | None = None
 ) -> list[JobSpec]:
-    """Jobs for one local day. Only monitored, active sites are pulled. An owner gets a
+    """Jobs for one local day. Only monitored, active sites are pulled; low-plan sites get no mid-day check. An owner gets a
     report job when at least one of their sites is, timed after the latest such sunset,
     and only if they have a Telegram chat (``linked_owners``; None means every owner)."""
     pull_offset = timedelta(minutes=settings.evening_pull_offset_minutes)
@@ -76,7 +76,7 @@ def plan_day_jobs(
         sunset = sunset_utc(site, local_date)
         owner_sunsets[site.owner_id].append(sunset)
         jobs.append(JobSpec(sunset + pull_offset, "evening_pull", site.se_site_id))
-        if site.commercial:
+        if site.commercial and site.call_plan != "low":
             for hhmm in site.check_times or settings.default_check_times:
                 jobs.append(JobSpec(_check_time(local_date, hhmm, site.tz), "midday_check", site.se_site_id))
 

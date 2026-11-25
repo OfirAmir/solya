@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import dataclasses
 import json
+import logging
 import re
 import sys
 from contextlib import contextmanager
@@ -20,7 +21,7 @@ from solya.clock import Clock, SystemClock
 from solya.config import Settings
 from solya.db import SessionFactory, init_db, make_engine, session_scope
 from solya.ingest import PullBundle
-from solya.models import DailyMetric, Owner, RawResponse, Site
+from solya.models import DailyMetric, FaultRecord, Owner, RawResponse, Site
 from solya.rules.daily import compute_site_day, persist_site_day
 from solya.rules.faults import detect_faults, open_fault_views
 from solya.rules.ray import load_ray
@@ -38,6 +39,7 @@ from solya.solaredge.parse import (
 USD_PER_CREDIT = 0.005
 CREDITS_WINDOW = timedelta(days=30)
 HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+log = logging.getLogger(__name__)
 
 
 class CliError(Exception):
@@ -152,6 +154,20 @@ def _parse_check_times(raw: str) -> list[str]:
     return times
 
 
+def _close_inverter_faults(s, site_id: int, now: datetime) -> None:
+    """The low plan cannot see inverter state: close those faults silently (no message)."""
+    open_faults = s.scalars(
+        select(FaultRecord).where(FaultRecord.site_id == site_id, FaultRecord.closed_at.is_(None))
+    )
+    closed = 0
+    for rec in open_faults:
+        if rec.key.startswith(("mode:", "missing:")):
+            rec.closed_at = now
+            closed += 1
+    print(f"closed {closed} inverter faults (low plan)")
+    log.info("site %s: closed %d inverter faults (low plan)", site_id, closed)
+
+
 def cmd_sites_set(args, settings: Settings, clock: Clock) -> int:
     with _session(settings) as s:
         site = _site_or_fail(s, args.site)
@@ -174,6 +190,13 @@ def cmd_sites_set(args, settings: Settings, clock: Clock) -> int:
             site.check_times = _parse_check_times(args.check_times)
         if args.status is not None:
             site.status = args.status
+        if args.monitored is not None:
+            site.monitored = args.monitored
+        if args.call_plan is not None:
+            switched_to_low = args.call_plan == "low" and site.call_plan != "low"
+            site.call_plan = args.call_plan
+            if switched_to_low:
+                _close_inverter_faults(s, site.se_site_id, clock.now())
         s.flush()
         _table(SITE_COLUMNS, [_site_row(site)])
     return 0
@@ -410,6 +433,9 @@ def build_parser() -> argparse.ArgumentParser:
     ss.add_argument("--no-commercial", dest="commercial", action="store_false")
     ss.add_argument("--check-times", help="comma separated HH:MM local times, for example 12:30,15:00")
     ss.add_argument("--status", choices=["active", "paused"])
+    ss.add_argument("--call-plan", choices=["standard", "low"])
+    ss.add_argument("--monitored", dest="monitored", action="store_true", default=None)
+    ss.add_argument("--no-monitored", dest="monitored", action="store_false")
     ss.set_defaults(fn=cmd_sites_set)
 
     sub.add_parser("credits", help="API credit usage").set_defaults(fn=cmd_credits)

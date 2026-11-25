@@ -87,11 +87,15 @@ Run inside the running container (`docker compose exec solya solya <command>`). 
 | `owners list` | Lists owners. |
 | `owners set-name --owner ID --name NAME` | Changes the name used in greetings. |
 | `sites list` | Id, owner, portal name, label, card name, commercial, tariff, basis, status, comm state, last update. Never shows tokens. |
-| `sites set --site ID [options]` | Options: `--label`, `--card-name`, `--tariff`, `--income-basis production\|export`, `--kwp`, `--commercial` / `--no-commercial`, `--check-times 12:30,15:00`, `--status active\|paused`. |
+| `sites set --site ID [options]` | Options: `--label`, `--card-name`, `--tariff`, `--income-basis production\|export`, `--kwp`, `--commercial` / `--no-commercial`, `--check-times 12:30,15:00`, `--status active\|paused`, `--call-plan standard\|low`, `--monitored` / `--no-monitored`. |
 | `credits` | Credits used this cycle against the cap, usage per site over the last 30 days, and an estimated cost at $0.005 per credit. |
 | `report --owner ID [--date YYYY-MM-DD] --dry-run --out out/` | Builds the evening report from stored data only. Writes the PNG and prints the text. Sends nothing and makes no API calls. |
 | `pull --site ID [--kind evening\|midday] [--notify]` | Pulls one site from the live API now and processes it exactly like the scheduled pull: stores the raw responses, saves the day's figures (evening kind) and updates fault records. Uses credits. Prints the parsed result. Sends no Telegram messages unless `--notify` is given; faults it records are alerted by the service's next pull. Without `--notify` it opens new fault records but closes none, so the service's next pull closes them and sends the follow-up. |
 | `replay --site ID --date YYYY-MM-DD [--dry-run]` | Re-parses the stored raw responses for that local day and recomputes the daily figures and prints the detected faults. Makes no API calls. See the note below. |
+
+### Low call plan
+
+`sites set --site ID --call-plan low` puts a site on the low-credit plan: the evening pull calls only `/sites/{id}`, `/overview` and `/alerts` (plus `/devices` when the stored list is more than 7 days old), and there is no mid-day check. It does not call inverter status or lifetime energy, so lifetime energy is not stored for those days. The low plan detects only open SolarEdge alerts and zero production, not inverter-mode or missing-inverter faults. Switching a site to `low` closes its open inverter-mode and missing-inverter faults without sending a message, and prints `closed N inverter faults (low plan)`. `--no-monitored` stops scheduled pulls, reports and alerts for a site; `solya pull` still works on it.
 
 ### When changes take effect
 
