@@ -149,6 +149,7 @@ class TokenManager:
 
     async def get_access_token(self, site_id: int) -> str:
         async with self._lock(site_id):
+            self._raise_if_reauth_needed(site_id)
             with session_scope(self._factory) as s:
                 row = s.get(SiteToken, site_id)
                 if row is None:
@@ -159,18 +160,26 @@ class TokenManager:
 
     async def force_refresh(self, site_id: int) -> None:
         async with self._lock(site_id):
+            self._raise_if_reauth_needed(site_id)
             await self._refresh_locked(site_id)
 
+    def _raise_if_reauth_needed(self, site_id: int) -> None:
+        with session_scope(self._factory) as s:
+            site = s.get(Site, site_id)
+            if site is not None and site.status == "reauth_needed":
+                raise AuthExpired(f"site {site_id} needs re-authorization")
+
     async def _call_refresh(self, site_id: int, refresh_token: str) -> TokenPair:
-        await self._budget.acquire(site_id, TOKEN_ENDPOINT, "essential")
-        try:
-            pair = await refresh_tokens(self._http, self._settings, refresh_token)
-        except Exception as e:
-            # Conservatively credited, even on failure.
-            self._budget.record(site_id, TOKEN_ENDPOINT, getattr(e, "http_status", 0), credited=True)
-            raise
-        self._budget.record(site_id, TOKEN_ENDPOINT, 200, credited=True)
-        return pair
+        async with self._budget.call_lock:
+            await self._budget.acquire(site_id, TOKEN_ENDPOINT, "essential")
+            try:
+                pair = await refresh_tokens(self._http, self._settings, refresh_token)
+            except Exception as e:
+                # Conservatively credited, even on failure.
+                self._budget.record(site_id, TOKEN_ENDPOINT, getattr(e, "http_status", 0), credited=True)
+                raise
+            self._budget.record(site_id, TOKEN_ENDPOINT, 200, credited=True)
+            return pair
 
     async def _refresh_locked(self, site_id: int) -> str:
         with session_scope(self._factory) as s:
@@ -179,6 +188,7 @@ class TokenManager:
                 raise LookupError(f"no token stored for site {site_id}")
             current = self._cipher.decrypt(row.refresh_enc)
             previous = self._cipher.decrypt(row.previous_refresh_enc) if row.previous_refresh_enc else None
+        used_previous = False
         try:
             try:
                 pair = await self._call_refresh(site_id, current)
@@ -187,17 +197,19 @@ class TokenManager:
                     raise
                 log.warning("refresh token rejected for site %s; retrying with previous token", site_id)
                 pair = await self._call_refresh(site_id, previous)
+                used_previous = True
         except AuthExpired:
             await self._mark_reauth_needed(site_id)
             raise
-        self._persist_rotation(site_id, pair)
+        self._persist_rotation(site_id, pair, keep_previous=used_previous)
         return pair.access_token
 
-    def _persist_rotation(self, site_id: int, pair: TokenPair) -> None:
+    def _persist_rotation(self, site_id: int, pair: TokenPair, keep_previous: bool) -> None:
         now = self._clock.now()
         with session_scope(self._factory) as s:
             row = s.get(SiteToken, site_id)
-            row.previous_refresh_enc = row.refresh_enc
+            if not keep_previous:  # the fallback token just worked; keep it as the fallback
+                row.previous_refresh_enc = row.refresh_enc
             row.access_enc = self._cipher.encrypt(pair.access_token)
             row.refresh_enc = self._cipher.encrypt(pair.refresh_token)
             row.access_expires_at = now + timedelta(seconds=pair.expires_in)
@@ -210,4 +222,7 @@ class TokenManager:
                 return
             site.status = "reauth_needed"
         log.warning("site %s needs re-authorization", site_id)
-        await self._on_reauth_needed(site_id)
+        try:
+            await self._on_reauth_needed(site_id)
+        except Exception as e:
+            log.error("on_reauth_needed callback failed for site %s: %s", site_id, type(e).__name__)

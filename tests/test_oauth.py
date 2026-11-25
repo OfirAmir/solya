@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import pytest
 import respx
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from solya.crypto import TokenCipher
 from solya.db import session_scope
@@ -174,7 +174,7 @@ async def test_refresh_falls_back_to_previous(db, mgr, clock, cipher):
     assert sent == ["r2", "r1"]
     r = row(db)
     assert cipher.decrypt(r.refresh_enc) == "r3"
-    assert cipher.decrypt(r.previous_refresh_enc) == "r2"
+    assert cipher.decrypt(r.previous_refresh_enc) == "r1"  # the working token stays as fallback
 
 
 @respx.mock
@@ -194,3 +194,47 @@ async def test_tokens_not_logged(db, mgr, clock, caplog):
         await mgr.get_access_token(SITE)
     for t in ("secret-access-2", "secret-refresh-2", "a1", "r1", "test-client-secret"):
         assert t not in caplog.text
+
+
+@respx.mock
+async def test_reauth_callback_failure_still_raises_auth_expired(db, settings, cipher, http, clock):
+    async def boom(_):
+        raise RuntimeError("telegram down")
+
+    m = TokenManager(db, settings, cipher, http, CreditBudget(db, settings, clock), clock, boom)
+    seed(db, m, clock, 60)
+    respx.post(TOKEN_URL).mock(return_value=httpx.Response(400, json={"error": "invalid_grant"}))
+    with pytest.raises(AuthExpired):
+        await m.get_access_token(SITE)
+    with session_scope(db) as s:
+        assert s.get(Site, SITE).status == "reauth_needed"
+
+
+@respx.mock
+async def test_reauth_needed_short_circuits(db, mgr, clock):
+    seed(db, mgr, clock, 60)
+    with session_scope(db) as s:
+        s.get(Site, SITE).status = "reauth_needed"
+    route = respx.post(TOKEN_URL).mock(return_value=ok())
+    with pytest.raises(AuthExpired):
+        await mgr.get_access_token(SITE)
+    with pytest.raises(AuthExpired):
+        await mgr.force_refresh(SITE)
+    assert route.call_count == 0
+    with session_scope(db) as s:
+        assert s.scalar(select(func.count()).select_from(ApiLedger)) == 0
+
+
+@respx.mock
+async def test_refresh_holds_budget_call_lock(db, mgr, clock):
+    seed(db, mgr, clock, 60)
+    held = []
+
+    def handler(request):
+        held.append(mgr._budget.call_lock.locked())
+        return ok()
+
+    respx.post(TOKEN_URL).mock(side_effect=handler)
+    await mgr.get_access_token(SITE)
+    assert held == [True]
+    assert not mgr._budget.call_lock.locked()

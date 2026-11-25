@@ -30,6 +30,8 @@ class CreditBudget:
         self._settings = settings
         self._clock = clock
         self._sleep = sleep
+        # Process-wide: serialises acquire -> HTTP -> record across all SolarEdge callers.
+        self.call_lock = asyncio.Lock()
 
     async def acquire(self, site_id: int | None, endpoint: str, priority: Priority) -> None:
         cap = self._settings.budget_monthly_credits
