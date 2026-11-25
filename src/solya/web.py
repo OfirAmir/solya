@@ -1,4 +1,5 @@
-"""OAuth connect/callback routes. Never logs query strings, codes or tokens."""
+"""OAuth connect/callback routes. Logs query parameter names, never their values,
+codes or tokens."""
 from __future__ import annotations
 
 import logging
@@ -46,11 +47,24 @@ async def connect(token: str, request: Request):
     return resp
 
 
+def _callback_failed(request: Request, reason: str, error: str | None = None,
+                     error_description: str | None = None) -> HTMLResponse:
+    """Log why a callback was refused: the parameter names and SolarEdge's error text,
+    which are not secret. Never the values (``code`` is a credential)."""
+    log.warning(
+        "oauth callback refused (%s); params=%s error=%s error_description=%s",
+        reason, sorted(request.query_params.keys()), error,
+        (error_description or "")[:200] or None,
+    )
+    return _html(CANCELLED, 400)
+
+
 @router.get("/oauth/callback")
 async def oauth_callback(
     request: Request,
     code: str | None = None,
-    site_id: int | None = None,
+    site_id: str | None = None,
+    siteId: str | None = None,  # noqa: N803 - alias, the echoed name is UNVERIFIED
     external_id: str | None = None,
     state: str | None = None,
     error: str | None = None,
@@ -58,9 +72,14 @@ async def oauth_callback(
 ):
     c = request.app.state.container
     if error:
-        return _html(CANCELLED, 400)
-    if not code or site_id is None:
-        return _html(CANCELLED, 400)
+        return _callback_failed(request, "error from SolarEdge", error, error_description)
+    raw_site_id = site_id if site_id is not None else siteId
+    if not code or not raw_site_id:
+        return _callback_failed(request, "code or site_id missing")
+    try:
+        site_id = int(raw_site_id)
+    except ValueError:
+        return _callback_failed(request, "site_id is not a number")
     ttl = c.settings.connect_token_ttl_minutes
     with session_scope(c.session_factory) as s:
         req = onboarding.resolve_callback(
@@ -68,6 +87,8 @@ async def oauth_callback(
         )
         token = req.token if req is not None else None
     if token is None:
+        log.warning("oauth callback refused (no usable connect request); params=%s cookie=%s",
+                    sorted(request.query_params.keys()), COOKIE in request.cookies)
         return _html(INVALID_LINK, 400)
     try:
         pair = await exchange_code(c.http, c.settings, code)

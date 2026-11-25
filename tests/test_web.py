@@ -125,6 +125,48 @@ def test_callback_error_param_400(env):
     assert "החיבור בוטל או נכשל. אפשר לנסות שוב עם /connect." in r.text
 
 
+def test_callback_error_is_logged_without_code(env, caplog):
+    """I8: a failed callback says why in the log: parameter names and the error, never the code."""
+    tc, *_ = env
+    with caplog.at_level(logging.INFO, logger="solya"):
+        r = tc.get("/oauth/callback", params={"error": "access_denied", "error_description": "user said no",
+                                              "code": CODE, "state": "s"})
+    assert r.status_code == 400
+    assert "access_denied" in caplog.text and "user said no" in caplog.text
+    assert "code" in caplog.text and "error_description" in caplog.text  # the names
+    assert CODE not in caplog.text
+
+
+def test_callback_missing_site_id_logged(env, caplog):
+    tc, *_ = env
+    with caplog.at_level(logging.INFO, logger="solya"):
+        r = tc.get("/oauth/callback", params={"code": CODE, "external_id": "x"})
+    assert r.status_code == 400
+    assert "החיבור בוטל או נכשל" in r.text
+    assert "site_id" in caplog.text and "external_id" in caplog.text
+    assert CODE not in caplog.text
+
+
+def test_callback_non_numeric_site_id_hebrew_400(env, caplog):
+    tc, *_ = env
+    with caplog.at_level(logging.INFO, logger="solya"):
+        r = tc.get("/oauth/callback", params={"code": CODE, "site_id": "abc"})
+    assert r.status_code == 400
+    assert 'dir="rtl"' in r.text and "החיבור בוטל או נכשל" in r.text
+    assert CODE not in caplog.text
+
+
+@respx.mock
+def test_callback_accepts_siteId_alias(env, load_fixture):
+    tc, container, channel, token = env
+    _mock_se(load_fixture("solaredge/site_home.json"))
+    nonce = _nonce(container, token)
+    r = tc.get("/oauth/callback", params={"code": CODE, "siteId": SITE_ID, "state": nonce})
+    assert r.status_code == 200
+    with session_scope(container.session_factory) as s:
+        assert s.get(Site, SITE_ID) is not None
+
+
 def test_callback_unknown_correlation_400(env):
     tc, *_ = env
     r = tc.get("/oauth/callback", params={"code": CODE, "site_id": SITE_ID,
