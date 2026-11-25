@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Bring up Solya on an EC2 instance for a trial: Docker + compose, the repo in /opt/solya,
 # a .env with PUBLIC_BASE_URL on <a-b-c-d>.sslip.io and a fresh TOKEN_ENCRYPTION_KEY, the
-# image built and checked, and the stack (Solya + Caddy with a Let's Encrypt certificate)
-# started. Safe to re-run: it never overwrites a value already set in .env.
+# image pulled from GHCR (or built from source with --build) and checked, and the stack
+# (Solya + Caddy with a Let's Encrypt certificate) started. Safe to re-run: it never overwrites a value already set in .env.
 #
 # Supported: Amazon Linux 2023, Ubuntu 22.04 and 24.04. Run it as your normal user (not
 # root, not through sudo); it calls sudo itself for the privileged steps.
 #
-#   deploy/ec2/setup.sh [--branch NAME] [--ip A.B.C.D] [--repo URL] [--dry-run] [--allow-root]
+#   deploy/ec2/setup.sh [--branch NAME] [--ip A.B.C.D] [--repo URL] [--build] [--dry-run] [--allow-root]
 #
 # It is written for a host that may run other things: it stops rather than take ports
 # 80/443 from another service, reuse another compose project, overlap a network in use,
@@ -16,7 +16,8 @@
 
 set -euo pipefail
 
-DEFAULT_BRANCH="claude/dreamy-turing-jyrdw1"
+DEFAULT_BRANCH="main"
+DEFAULT_IMAGE="ghcr.io/ofiramir/solya:latest"   # published by .github/workflows/cd.yml
 DEFAULT_REPO="https://github.com/OfirAmir/solya.git"
 INSTALL_DIR="${SOLYA_DIR:-/opt/solya}"
 PROJECT="solya-ec2"
@@ -26,7 +27,7 @@ EXAMPLE_BASE_URL="https://solya.example.com"
 DEFAULT_SUBNET="192.168.250.0/24"   # outside 10/8 and 172.16/12, where VPCs usually live
 COMPOSE_MIN="2.24.0"   # `ports: !reset []` in the override needs 2.24+
 COMPOSE_VERSION="${SOLYA_COMPOSE_VERSION:-v2.32.4}"   # used only when the plugin is missing or too old
-BUILDX_VERSION="${SOLYA_BUILDX_VERSION:-v0.20.1}"     # used only when buildx is missing
+BUILDX_VERSION="${SOLYA_BUILDX_VERSION:-v0.20.1}"     # used only with --build, when buildx is missing
 DOCKER_CFG="$INSTALL_DIR/.docker"                     # private DOCKER_CONFIG, set only in dc/dc_capture
 PLUGIN_DIR="$DOCKER_CFG/cli-plugins"
 IMDS="http://169.254.169.254/latest"
@@ -37,6 +38,7 @@ REQUIRED_SECRETS=(SOLAREDGE_CLIENT_ID SOLAREDGE_CLIENT_SECRET TELEGRAM_BOT_TOKEN
 BRANCH="$DEFAULT_BRANCH"
 REPO_URL="$DEFAULT_REPO"
 IP_ARG=""
+BUILD=0
 DRY_RUN=0
 ALLOW_ROOT=0
 
@@ -71,12 +73,14 @@ stop_check() {
 
 usage() {
     cat <<EOF
-Usage: $0 [--branch NAME] [--ip A.B.C.D] [--repo URL] [--dry-run] [--allow-root]
+Usage: $0 [--branch NAME] [--ip A.B.C.D] [--repo URL] [--build] [--dry-run] [--allow-root]
 
   --branch NAME   git branch to deploy (default: $DEFAULT_BRANCH)
   --ip A.B.C.D    public IPv4 to build the sslip.io host from. Wins over the
                   EC2 metadata lookup; needed when IMDSv2 is not reachable.
   --repo URL      git URL to clone (default: $DEFAULT_REPO)
+  --build         build the image from the checked-out source and tag it as SOLYA_IMAGE,
+                  instead of pulling it from GHCR (GHCR unreachable, or testing local changes)
   --dry-run       print the planned actions; change nothing
   --allow-root    allow running as root (normally refused: run as your own user)
   -h, --help      this help
@@ -137,6 +141,7 @@ parse_args() {
             --ip=*)     IP_ARG="${1#*=}"; shift ;;
             --repo)     [[ $# -ge 2 ]] || die "--repo needs a value"; REPO_URL="$2"; shift 2 ;;
             --repo=*)   REPO_URL="${1#*=}"; shift ;;
+            --build)    BUILD=1; shift ;;
             --dry-run)  DRY_RUN=1; shift ;;
             --allow-root) ALLOW_ROOT=1; shift ;;
             -h|--help)  usage; exit 0 ;;
@@ -183,8 +188,10 @@ setup_sudo() {
 check_resources() {
     local mem_kb avail_kb
     mem_kb="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
-    if [[ -n "$mem_kb" ]] && (( mem_kb > 0 && mem_kb < 900000 )); then
-        warn "only $(( mem_kb / 1024 )) MB RAM. About 1 GB is the minimum; the image build may fail."
+    if [[ -n "$mem_kb" ]] && (( mem_kb > 0 && mem_kb < 450000 )); then
+        warn "only $(( mem_kb / 1024 )) MB RAM. About 512 MB is the minimum to run Solya and Caddy."
+    elif (( BUILD )) && [[ -n "$mem_kb" ]] && (( mem_kb > 0 && mem_kb < 900000 )); then
+        warn "only $(( mem_kb / 1024 )) MB RAM. A local build (--build) wants about 1 GB; it may fail. Pulling the published image needs far less."
     fi
     avail_kb="$(df -Pk "$(dirname "$INSTALL_DIR")" 2>/dev/null | awk 'NR==2 {print $4}' || echo 0)"
     if [[ -n "$avail_kb" ]] && (( avail_kb > 0 && avail_kb < 4000000 )); then
@@ -621,11 +628,15 @@ install_compose_plugin() {
 }
 
 install_buildx_plugin() {
+    if (( ! BUILD )); then
+        info "docker buildx: not needed (the image is pulled; only --build needs it)"
+        return
+    fi
     if ro_root env DOCKER_CONFIG="$DOCKER_CFG" docker buildx version >/dev/null 2>&1; then
         info "docker buildx: present"
         return
     fi
-    log "Installing the docker buildx plugin $BUILDX_VERSION for this kit only (compose build uses it)"
+    log "Installing the docker buildx plugin $BUILDX_VERSION for this kit only (--build uses it)"
     local a file base sum=""
     a="$(docker_arch buildx)"
     file="buildx-$BUILDX_VERSION.linux-$a"
@@ -806,6 +817,10 @@ prepare_env() {
     fill_or_check SOLYA_IP_RANGE "$NET_RANGE" "$read_from"
     fill_or_check SOLYA_CADDY_IP "$NET_CADDY" "$read_from"
 
+    # The image the stack runs: pulled from GHCR, or built locally with --build. Pin a fixed
+    # version by setting it by hand, e.g. ghcr.io/ofiramir/solya:sha-<commit>; never overwritten.
+    fill_or_check SOLYA_IMAGE "$DEFAULT_IMAGE" "$read_from"
+
     if [[ -n "$(env_get "$read_from" TRUSTED_PROXIES)" ]]; then
         info "Note: TRUSTED_PROXIES in .env is ignored; docker-compose.caddy.yml sets it to SOLYA_CADDY_IP ($NET_CADDY)."
     fi
@@ -841,9 +856,28 @@ missing_secrets() {
 
 # ----------------------------------------------------------------------------- stack
 
+# Get the image named by SOLYA_IMAGE: pull it from the registry, or with --build build it
+# from the checked-out source (compose tags the result with that name). Never falls back
+# from one to the other silently.
+get_image() {
+    local image
+    image="$(env_get "$ENV_FILE" SOLYA_IMAGE)"
+    [[ -n "$image" ]] || image="$DEFAULT_IMAGE"
+    if (( BUILD )); then
+        log "Building the image from source in $INSTALL_DIR, tagged $image"
+        dc build solya
+        return
+    fi
+    log "Pulling the image $image"
+    # --policy always: the service's pull_policy is `missing`, which would skip a tag
+    # (such as latest) that is already present locally and so never update it.
+    if ! dc pull --policy always solya; then
+        die "could not pull $image. If the package is private, log in once with a token that has read:packages (user: your GitHub name, password: the token): sudo env DOCKER_CONFIG=$DOCKER_CFG docker login ghcr.io  (this kit reads credentials from its own DOCKER_CONFIG, so a plain sudo docker login is not seen), then re-run. Or build from this checkout instead: $0 --build"
+    fi
+}
+
 build_and_check() {
-    log "Building the image ($PROJECT)"
-    dc build
+    get_image
     log "Checking Pillow's Raqm layout (Hebrew report card)"
     dc run --rm --no-deps -T solya python -c "from solya.render.card import assert_raqm; assert_raqm()"
     (( DRY_RUN )) || info "Raqm OK"

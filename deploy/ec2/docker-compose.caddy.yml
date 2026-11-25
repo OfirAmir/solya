@@ -16,8 +16,12 @@ name: solya-ec2
 
 services:
   solya:
-    # A unique image tag: the base file's plain `solya` could clash with another checkout.
-    image: solya-ec2
+    # The published image (setup.sh pulls it). The base file's `build: .` stays, so
+    # `setup.sh --build` can build locally; that build is tagged with this same name.
+    # `missing`: `up` and `run` use the local image and never build or pull when it exists
+    # (setup.sh pulls with --policy always to update it).
+    image: ${SOLYA_IMAGE:-ghcr.io/ofiramir/solya:latest}
+    pull_policy: missing
     # The base file publishes 127.0.0.1:8000. Compose merges `ports` lists by appending, so
     # leaving it out here would keep that mapping. Reset it: only Caddy reaches the app,
     # over the compose network. `expose` documents the port without publishing it.
