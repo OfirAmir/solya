@@ -98,3 +98,10 @@ def test_parse_lifetime(load_fixture):
     lt = parse.parse_lifetime(load_fixture("solaredge/lifetime_farm.json"), TZ)
     assert lt.energy_wh == 671421060
     assert lt.last_update_time == datetime(2026, 11, 24, 14, 45, tzinfo=timezone.utc)
+
+
+def test_parse_site_missing_timezone_uses_default(load_fixture):
+    j = load_fixture("solaredge/site_farm.json")
+    j["location"].pop("timezone")
+    assert parse.parse_site(j).timezone == "Asia/Jerusalem"
+    assert parse.parse_site(j, default_tz="Europe/Berlin").timezone == "Europe/Berlin"

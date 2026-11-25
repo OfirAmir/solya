@@ -18,9 +18,9 @@ def _time(v: str | None, tz: str) -> datetime | None:
     return parse_se_time(v, tz) if v else None
 
 
-def parse_site(j: dict) -> SiteInfo:
+def parse_site(j: dict, default_tz: str = "Asia/Jerusalem") -> SiteInfo:
     loc = j.get("location") or {}
-    tz = loc.get("timezone") or "UTC"
+    tz = loc.get("timezone") or default_tz
     return SiteInfo(
         site_id=int(j["siteId"]),
         name=j.get("name") or "",
