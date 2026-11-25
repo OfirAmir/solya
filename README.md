@@ -253,3 +253,26 @@ pytest
 ```
 
 The report card needs Pillow with the Raqm layout engine. On Debian and Ubuntu that means `libfribidi0` (the Docker image installs it). The service checks this at start-up and refuses to run without it.
+
+## CI/CD (GitHub Actions)
+
+- **CI** (`.github/workflows/ci.yml`) runs on every pull request and can be started by hand. It does two things:
+  - runs the full test suite on Python 3.12;
+  - builds the Docker image and checks inside it that the Hebrew card renders (Raqm) and that the CLI starts.
+- **CD** (`.github/workflows/cd.yml`) runs on pushes to `main`, on `v*` tags, and by hand. It runs CI first. If CI passes, it builds the image for `linux/amd64` and `linux/arm64` and pushes it to the GitHub Container Registry as `ghcr.io/ofiramir/solya`, with these tags:
+  - `latest` on `main`
+  - `sha-<commit>`
+  - `X.Y.Z` and `X.Y` for a `vX.Y.Z` tag
+
+The push uses the workflow's own `GITHUB_TOKEN`, so no secrets are needed. After the first push, the repository owner should check the package's visibility in GitHub, under Packages → `solya` → Package settings. The visibility decides who can pull the image:
+
+| Visibility | Pulling the image |
+| --- | --- |
+| Public | Works without logging in |
+| Private | Needs `docker login ghcr.io` with a personal access token that has `read:packages` |
+
+To pull it on a server:
+
+```bash
+docker pull ghcr.io/ofiramir/solya:latest
+```
