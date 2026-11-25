@@ -278,7 +278,8 @@ async def connect_site_start(request: Request, csrf: str = Form("")):
 
 
 def _sites_page(request: Request, owner_id: int, csrf: str, *, error: str | None = None,
-                status: int = 200):
+                status: int = 200, ticked: set[str] | None = None):
+    """``ticked`` (the submitted ids) replaces the stored flags when re-rendering a form."""
     c = _container(request)
     with session_scope(c.session_factory) as s:
         linked = s.get(Owner, owner_id).telegram_chat_id is not None
@@ -288,7 +289,8 @@ def _sites_page(request: Request, owner_id: int, csrf: str, *, error: str | None
             rows.append({
                 "id": site.se_site_id,
                 "name": site.card_name or site.portal_name,
-                "monitored": site.monitored,
+                "monitored": (site.monitored if ticked is None
+                              else str(site.se_site_id) in ticked),
                 "portal_kw": site.peak_power_kwp_reported,
                 "price": describe_price(p.agorot, p.is_estimate),
             })
@@ -328,7 +330,7 @@ async def sites_save(request: Request):
             for site in own:
                 site.monitored = str(site.se_site_id) in ticked
     if not picked:
-        return _sites_page(request, owner_id, csrf, error=PICK_ONE, status=400)
+        return _sites_page(request, owner_id, csrf, error=PICK_ONE, status=400, ticked=ticked)
     return RedirectResponse("/price", status_code=303)
 
 

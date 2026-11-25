@@ -714,3 +714,16 @@ def test_pay_after_amount_change_creates_new_payment(tc, container):
     # the latest pending payment matches again, so it is reused
     assert tc.post("/pay", data={"csrf": csrf}).headers["location"] == second
     assert _payment_count(container) == 2
+
+
+def test_sites_error_shows_submitted_selection(tc, container):
+    owner_id = _web_owner(tc, container)
+    _add_site(container, owner_id, 111111)
+    _add_site(container, owner_id, 111112)
+    page = tc.get("/sites").text
+    assert page.count(" checked") == 2  # the stored flags on a plain GET
+    r = tc.post("/sites", data={"csrf": _csrf(page)})
+    assert r.status_code == 400 and PICK_ONE in r.text
+    assert "111111" in r.text and "111112" in r.text
+    assert "checked" not in r.text
+    assert _monitored(container) == {111111: True, 111112: True}
