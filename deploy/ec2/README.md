@@ -154,21 +154,49 @@ The app's redirect URI must be exactly this (it is the path in `src/solya/web/oa
 https://<host>/oauth/callback
 ```
 
-> [!WARNING]
-> **Do not reuse the software house's (vendor's) SolarEdge app for this trial.**
->
-> - A SolarEdge app has one registered redirect URI. Pointing the vendor's app at this server breaks the vendor's own connect flow for as long as it points here.
-> - The vendor's app shares one credit quota (2,000 credits a month on the free tier) with everything the vendor runs. This trial would use up the vendor's credits, and the vendor would use up the trial's.
->
-> **Recommended:** Oren creates a **new free developer app** at developer.solaredge.com:
->
-> - type **"Site Access (OAuth)"**;
-> - scopes **`SITE_DATA`** and **`DEVICE_DATA`**;
-> - redirect URI **`https://<host>/oauth/callback`**.
->
-> As the main README says, also do not reuse Oren's personal "Oren Home Monitor" app: its daily job rotates the same sites' refresh tokens, and the two would race.
+Which app to use is Oren's decision. There are two routes.
 
-Oren sends the client secret through a private channel of his choice, and you type it straight into `.env` on the server.
+> [!WARNING]
+> Do not reuse Oren's personal "Oren Home Monitor" app, whichever route you take. Its daily job rotates the same sites' refresh tokens, and the two systems would race.
+
+### Route A: a new developer app
+
+This is the isolated option. Nothing else is affected.
+
+Oren signs up for a **new free developer account** at developer.solaredge.com, using an email not already registered there. A free account holds exactly one app, so his existing accounts cannot take a second one. He then creates an app with these settings:
+
+- type **"Site Access (OAuth)"**
+- scopes **`SITE_DATA`** and **`DEVICE_DATA`**
+- redirect URI **`https://<host>/oauth/callback`**
+
+The account comes with its own 2,000 credits a month. Oren's two sites use about 520 of them.
+
+### Route B: the Solya app (the software house's)
+
+This route reuses the app in the Solya developer account, which the software house connected. It is on the Business Starter plan until 17 Dec 2026. Oren chose this route because he is leaving the vendor. Before switching, know what it does:
+
+1. **The vendor's new connections stop working.** The app has one registered redirect URI, and pointing it at this server breaks the vendor's connect flow for anyone new. Connections that already exist should keep running, because grants already given do not depend on the redirect URI. If other customers are still onboarding through the vendor, tell Oren first.
+2. **Copy the client secret. Do not regenerate it.** The vendor's running system uses the same secret to refresh its tokens. If the portal only lets Oren *regenerate* the secret, the vendor's service stops that same day. Do that only if Oren means to cut the vendor off.
+3. **Credits and the rate limit are shared with the vendor.** The plan's 20,000 credits a month and 25 calls a minute cover everything the vendor still runs, plus this server. Solya's budget guard counts only its own calls. If the vendor uses up the month, SolarEdge refuses this server's pulls as well. The evening report then says the data has not arrived; it never shows zero. Ask the vendor to stop polling, or switch the app off on their side, as soon as Oren is ready.
+4. **The plan reverts on 17 Dec.** After that the account is on the free tier: 2,000 credits a month and one app. That is still enough for Oren's two sites, as long as the vendor's system has stopped by then.
+5. **Oren approves both sites again** through this server (step 8). His sites already have a grant on this same app from the vendor's side. Whether a second grant for the same app and site cancels the first is unconfirmed. If it does, the vendor's monitoring of Oren's own sites stops.
+
+Also tell Solya the plan's real budget. Add these lines to `/opt/solya/.env`:
+
+```
+BUDGET_MONTHLY_CREDITS=20000
+BUDGET_BILLING_DAY=17
+```
+
+The billing day is the 17th because the Starter plan was bought on 17 Nov. After 17 Dec, change the first line to `BUDGET_MONTHLY_CREDITS=2000` and keep the billing day. Then apply it:
+
+```bash
+/opt/solya/deploy/ec2/compose up -d
+```
+
+### Either route
+
+Oren sends the client secret through a private channel of his choice. You type it straight into `.env` on the server. Never paste it into a chat.
 
 ## 5. Admin and optional settings
 
