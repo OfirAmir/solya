@@ -19,7 +19,7 @@ def settings() -> Settings:
         solaredge_client_secret="test-client-secret",
         telegram_bot_token="123456:test-bot-token",
         telegram_bot_username="solya_test_bot",
-        public_base_url="https://solya.example.com",
+        public_base_url="https://solya.example",
         token_encryption_key=Fernet.generate_key().decode(),
     )
 
