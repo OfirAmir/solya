@@ -84,7 +84,7 @@ Tell Ofir to open the file on the server with `nano /opt/solya/.env`. **Prompt h
 
 | Key | Where the value comes from |
 | --- | --- |
-| `TELEGRAM_BOT_TOKEN` | Ben created the bot with BotFather. Ben sends the token to Ofir privately. |
+| `TELEGRAM_BOT_TOKEN` | The teammate who created the bot with BotFather sends the token to Ofir privately. |
 | `TELEGRAM_BOT_USERNAME` | The bot's username, **without** the `@`. |
 | `SOLAREDGE_CLIENT_ID` | From Oren. This is the Solya developer app (route B in the guide, step 4). |
 | `SOLAREDGE_CLIENT_SECRET` | From Oren, sent privately. He must **copy** the existing secret, **not regenerate** it, or the vendor's running system stops. |
@@ -148,7 +148,7 @@ Create Oren's one-time invite:
 
 It prints a `telegram:` link and a `web:` link for the same token. Give Oren one of them.
 
-## Report back to Ofir (and Ben)
+## Report back to Ofir and the team
 
 - Instance ID, region, and the Elastic IP.
 - The security-group rules you added.
