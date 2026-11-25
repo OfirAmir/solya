@@ -163,9 +163,13 @@ These come from the API recon (section 8) and have not been checked against the 
 - The paid deep bill check.
 - WhatsApp. Only the adapter seam exists.
 - A dashboard or any admin UI. Admin is the CLI only.
-- LLM or free-form Q&A. Only the fixed questions are answered.
+- Free-form Q&A by default. Only the fixed questions are answered unless the optional AI answers below are switched on.
 - Weather inputs. They are only needed for RAY, which is disabled until its formula arrives.
 - Anything that lets a customer message change an account. Inbound messages can only request a connect link, register with an invite, and acknowledge a fault.
+
+## Optional AI answers
+
+Off by default (`LLM_ENABLED=false`). When you enable it (`LLM_ENABLED=true`, plus `LLM_API_KEY`, `LLM_MODEL`, optionally `LLM_BASE_URL` and `LLM_MONTHLY_TOKENS_PER_OWNER`), a free-form owner message that matches none of the fixed questions is sent, together with up to 31 days of stored site aggregates (date, site label, kWh, income, communication state, open faults), to the configured provider. No email, phone or token is sent. The answer is dropped in favour of the help text if it contains a number that is not in that data. It cannot change anything.
 
 ## Development
 

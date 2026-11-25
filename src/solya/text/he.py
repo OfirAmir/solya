@@ -177,3 +177,6 @@ def reauth_link(name: str, label: str, url: str, local_dt: datetime) -> str:
         f"{greeting(local_dt)} {name},\n"
         f"החיבור ל־SolarEdge עבור {label} פג. כדי שאמשיך לעקוב, פתחו את הקישור ואשרו מחדש:\n{url}"
     )
+
+AI_BUDGET_USED = "התקציב החודשי לתשובות פתוחות נוצל. אני עדיין שולחת את הסיכום וההתראות."
+AI_UNAVAILABLE = "המידע עדיין לא הגיע אלי, אני על זה."

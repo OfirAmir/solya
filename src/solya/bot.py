@@ -15,7 +15,7 @@ from telegram.ext import (
 )
 
 from solya.db import session_scope
-from solya.services import answers, onboarding
+from solya.services import ai_answers, answers, onboarding
 from solya.text.he import CHAT_BOUND_ELSEWHERE, HELP, INVITE_OK, NOT_INVITED, connect_link
 from solya.text.rtl import rtl_text
 
@@ -98,14 +98,27 @@ def build_bot_application(token: str, container) -> Application:
     async def _answer(update: Update, route: answers.Route | None) -> None:
         """``route`` None means free text, routed by its wording."""
         now = container.clock.now()
+        ask_ai_for: int | None = None
+        question = update.effective_message.text or ""
         with session_scope(container.session_factory) as s:
             owner = known_owner(s, update, now)
             if owner is None:
                 text = NOT_INVITED
             else:
                 if route is None:
-                    route = answers.route_text(update.effective_message.text or "")
+                    route = answers.route_text(question)
+                    if route == "help" and container.settings.llm_enabled:
+                        ask_ai_for = owner.id
                 text = answers.answer_for(route, s, owner, now)
+        if ask_ai_for is not None:
+            text = await ai_answers.answer(
+                container.http,
+                container.settings,
+                container.session_factory,
+                ask_ai_for,
+                question,
+                now,
+            )
         await reply(update, text)
 
     async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
