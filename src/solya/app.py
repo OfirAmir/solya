@@ -126,12 +126,20 @@ def create_app(container: Container, start_background: bool = True) -> FastAPI:
     return app
 
 
+def configure_logging() -> None:
+    """INFO logging, with HTTP client libraries quieted: they log request URLs
+    (the Telegram bot token is part of the URL)."""
+    logging.basicConfig(level=logging.INFO)
+    for name in ("httpx", "httpcore", "telegram", "apscheduler"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
 def main() -> None:  # pragma: no cover
     import uvicorn
 
     from solya.config import get_settings
 
-    logging.basicConfig(level=logging.INFO)
+    configure_logging()
     app = create_app(build_container(get_settings()))
     # access log would record the OAuth callback query string (code)
     uvicorn.run(app, host="0.0.0.0", port=8000, access_log=False)

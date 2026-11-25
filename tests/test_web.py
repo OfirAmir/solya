@@ -134,3 +134,17 @@ def test_callback_code_not_logged(env, caplog, load_fixture):
     blob = " ".join(r.getMessage() + str(r.args) for r in app_records)
     for secret in (CODE, ACCESS, REFRESH, nonce):
         assert secret not in blob
+
+
+def test_configure_logging_silences_http_loggers():
+    from solya.app import configure_logging
+
+    names = ("httpx", "httpcore", "telegram", "apscheduler")
+    saved = {n: logging.getLogger(n).level for n in names}
+    try:
+        configure_logging()
+        for n in names:
+            assert logging.getLogger(n).getEffectiveLevel() >= logging.WARNING
+    finally:
+        for n, lvl in saved.items():
+            logging.getLogger(n).setLevel(lvl)
