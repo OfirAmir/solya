@@ -91,9 +91,9 @@ Run inside the running container (`docker compose exec solya solya <command>`). 
 | `credits` | Credits used this cycle against the cap, usage per site over the last 30 days, and an estimated cost at $0.005 per credit. |
 | `report --owner ID [--date YYYY-MM-DD] --dry-run --out out/` | Builds the evening report from stored data only. Writes the PNG and prints the text. Sends nothing and makes no API calls. |
 | `pull --site ID [--kind evening\|midday]` | A manual live pull. Uses credits. Prints the parsed result. The raw responses are stored like any other pull. |
-| `replay --site ID --date YYYY-MM-DD [--dry-run]` | Re-parses the stored raw responses for that local day and recomputes the daily figures and faults. Makes no API calls. See the note below. |
+| `replay --site ID --date YYYY-MM-DD [--dry-run]` | Re-parses the stored raw responses for that local day and recomputes the daily figures and prints the detected faults. Makes no API calls. See the note below. |
 
-`replay` writes the recomputed daily row and updates fault records the same way the evening pipeline does, using the stored pull time as "now". Replaying an old date reconciles faults against that old data, which can close faults that are open today. Use `--dry-run` to look without saving. A replay never sends messages, but a fault it opens is alerted on the next pull.
+`replay` writes the recomputed daily row only. It prints the faults it detects but never creates, closes or alerts on fault records. Use `--dry-run` to save nothing at all.
 
 ## First-run verification
 

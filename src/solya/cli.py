@@ -22,13 +22,7 @@ from solya.db import SessionFactory, init_db, make_engine, session_scope
 from solya.ingest import PullBundle
 from solya.models import DailyMetric, Owner, RawResponse, Site
 from solya.rules.daily import compute_site_day, persist_site_day
-from solya.rules.faults import (
-    ClosedFault,
-    NewFault,
-    detect_faults,
-    open_fault_views,
-    sync_faults,
-)
+from solya.rules.faults import detect_faults, open_fault_views
 from solya.rules.ray import load_ray
 from solya.services import onboarding
 from solya.services.reporting import build_owner_report
@@ -302,19 +296,16 @@ def cmd_replay(args, settings: Settings, clock: Clock) -> int:
         bundle = _bundle_from_raw(bodies, site, settings, pulled_at)
         for name, err in sorted(bundle.errors.items()):
             print(f"warning: {name}: {err}")
-        # Same steps as Reporter._process for an evening pull; the stored pull time is "now".
+        # Same detection and day computation as an evening pull; the stored pull time is "now".
+        # Faults are only printed: replay never touches fault records.
         now = pulled_at
         count = len(s.scalars(select(Site.se_site_id).where(Site.owner_id == site.owner_id)).all())
         detected = detect_faults(
             bundle, list(site.expected_inverters or []), now, True, "evening",
             settings.stale_after_minutes,
         )
-        events = []
         if detected is None:
-            print("site data is stale: faults left untouched")
-        else:
-            complete = "alerts" not in bundle.errors and "inverters" not in bundle.errors
-            events = sync_faults(s, site.se_site_id, detected, now, complete)
+            print("site data is stale: no faults detected")
         day = compute_site_day(
             site, count, bundle, open_fault_views(s, site.se_site_id), now, settings,
             load_ray(settings.ray_implementation), local_date=local_date, session=s,
@@ -324,11 +315,10 @@ def cmd_replay(args, settings: Settings, clock: Clock) -> int:
         persist_site_day(s, day, local_date, lifetime_wh, as_of, computed_at=now)
         print(f"site {site.se_site_id} {local_date}: state={day.state} production_wh={day.production_wh} "
               f"export_wh={day.export_wh} income_ils={day.income_ils} ray={day.ray}")
-        for ev in events:
-            kind = "new fault" if isinstance(ev, NewFault) else "closed fault"
-            print(f"{kind}: {ev.record.key} ({ev.record.code})")
-        if not events:
-            print("no fault changes")
+        for d in detected or []:
+            print(f"detected fault (not saved): {d.key} ({d.code})")
+        if not detected:
+            print("no faults detected")
         if args.dry_run:
             s.rollback()
             print("dry run: nothing saved")

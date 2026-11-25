@@ -189,10 +189,9 @@ def test_replay_recomputes_from_raw(cfg, factory, load_fixture, capsys):
         row = s.get(DailyMetric, (FARM, DAY))
         assert row.production_wh == 316990.0
         assert row.income_ils == Decimal("142.65")
-        faults = s.scalars(select(FaultRecord)).all()
-        assert [f.key for f in faults] == ["alert:101"]
+        assert s.scalars(select(FaultRecord)).all() == []
     out = capsys.readouterr().out
-    assert "142.65" in out and "alert:101" in out
+    assert "142.65" in out and "alert:101" in out and "not saved" in out
 
 
 def test_replay_dry_run_writes_nothing(cfg, factory, load_fixture):
