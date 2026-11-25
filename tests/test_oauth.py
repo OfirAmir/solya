@@ -238,3 +238,16 @@ async def test_refresh_holds_budget_call_lock(db, mgr, clock):
     await mgr.get_access_token(SITE)
     assert held == [True]
     assert not mgr._budget.call_lock.locked()
+
+
+@respx.mock
+async def test_store_new_grant_reactivates_site(db, mgr, clock):
+    seed(db, mgr, clock, 60)
+    with session_scope(db) as s:
+        s.get(Site, SITE).status = "reauth_needed"
+    route = respx.post(TOKEN_URL).mock(return_value=ok())
+    mgr.store_new_grant(SITE, TokenPair("a9", "r9", 3600))
+    with session_scope(db) as s:
+        assert s.get(Site, SITE).status == "active"
+    assert await mgr.get_access_token(SITE) == "a9"
+    assert route.call_count == 0

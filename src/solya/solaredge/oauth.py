@@ -146,6 +146,9 @@ class TokenManager:
             row.refreshed_at = now
             row.authorized_at = now
             row.grant_expires_at = _add_months(now, self._settings.se_access_duration_months)
+            site = s.get(Site, site_id)
+            if site is not None and site.status == "reauth_needed":
+                site.status = "active"
 
     async def get_access_token(self, site_id: int) -> str:
         async with self._lock(site_id):
