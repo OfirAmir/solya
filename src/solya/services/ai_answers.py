@@ -24,7 +24,7 @@ from solya.rules.daily import effective_label
 from solya.rules.faults import open_fault_views
 from solya.services.answers import DEFAULT_TZ, _sites
 from solya.text.he import AI_BUDGET_USED, HELP, NO_DATA_YET
-from solya.text.rtl import RLM, rtl_text
+from solya.text.rtl import rtl_text
 
 log = logging.getLogger(__name__)
 
@@ -54,6 +54,13 @@ ACTION_CLAIM_STEMS = (
 # "1,234" / "1,234,567" (thousands, optional decimals) first, then plain / decimal-comma numbers.
 _REPLY_NUMBER = re.compile(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:[.,]\d+)?")
 _CONTEXT_NUMBER = re.compile(r"\d+(?:\.\d+)?")
+# Zero-width and bidi controls: removed before both checks, so none can split an action
+# stem or a number ("3<ZWSP>17" read as 3 and 17) to slip past them (final review M4).
+_INVISIBLE = re.compile("[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
+
+
+def _visible(text: str) -> str:
+    return _INVISIBLE.sub("", text)
 
 
 def build_context(session: Session, owner: Owner, now: datetime) -> dict:
@@ -111,11 +118,11 @@ def numbers_grounded(reply: str, context: dict) -> bool:
         allowed.add(value)
         for places in (0, 1, 2):
             allowed.add(_rounded(value, places))
-    return all(_normalise(t) in allowed for t in _REPLY_NUMBER.findall(reply))
+    return all(_normalise(t) in allowed for t in _REPLY_NUMBER.findall(_visible(reply)))
 
 
 def claims_action(reply: str) -> bool:
-    plain = reply.replace(RLM, "")
+    plain = _visible(reply)
     return any(stem in plain for stem in ACTION_CLAIM_STEMS)
 
 

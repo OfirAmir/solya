@@ -267,3 +267,26 @@ async def test_ai_cannot_change_state(ai_settings, clock, db, owner_id):
     assert sent == rtl_text(HELP)
     with db() as s:
         assert s.query(Owner).count() == 1
+
+
+# Final review M4: invisible and bidi controls must not split a stem or a number.
+INVISIBLE = ["\u200b", "\u200c", "\u200d", "\u200e", "\u200f", "\u202a", "\u202c", "\u202e",
+             "\u2066", "\u2069", "\ufeff"]
+
+
+@pytest.mark.parametrize("ch", INVISIBLE)
+def test_claim_filter_ignores_invisible_controls(ch):
+    assert ai_answers.claims_action(f"בי{ch}טלתי את המנוי")
+
+
+@pytest.mark.parametrize("ch", INVISIBLE)
+def test_numeric_guard_ignores_invisible_controls(ch):
+    ctx = {"production_kwh": 3.0, "income": 17.0}
+    assert not ai_answers.numbers_grounded(f"הפקת 3{ch}17 קוט״ש", ctx)
+    assert ai_answers.numbers_grounded(f"הפקת 3{ch} קוט״ש", ctx)
+
+
+@respx.mock
+async def test_ai_zero_width_split_number_blocked(ai_settings, db, owner_id):
+    respx.post(URL).mock(return_value=_reply("הפקת 23\u200b11 קוט״ש"))
+    assert await _ask(ai_settings, db, owner_id) == HELP
