@@ -232,3 +232,69 @@ def test_pull_prints_parsed_bundle_without_secrets(cfg, factory, load_fixture, c
     assert ACCESS_TOKEN not in out
     with session_scope(factory) as s:
         assert s.scalars(select(RawResponse)).all()
+
+
+PULL_NOW = datetime(2026, 11, 24, 15, 5, tzinfo=timezone.utc)
+
+
+def _pull_setup(cfg, factory):
+    seed_sites(factory)
+    cipher = TokenCipher(cfg.token_encryption_key.get_secret_value())
+    with session_scope(factory) as s:
+        s.add(SiteToken(
+            site_id=FARM, access_enc=cipher.encrypt(ACCESS_TOKEN), refresh_enc=cipher.encrypt("r"),
+            access_expires_at=PULL_NOW + timedelta(hours=1), refreshed_at=PULL_NOW,
+            authorized_at=PULL_NOW, grant_expires_at=PULL_NOW + timedelta(days=300),
+        ))
+
+
+def _mock_farm(load_fixture):
+    for path, name in (("", "site_farm.json"), ("/overview", "overview_farm_20261124.json"),
+                       ("/alerts", "alerts_fan.json"), ("/inverters/status", "inverters_status_ok.json"),
+                       ("/lifetime-energy", "lifetime_farm.json"), ("/devices", "devices_farm.json")):
+        respx.get(f"{BASE}/sites/{FARM}{path}").mock(
+            return_value=httpx.Response(200, json=load_fixture(f"solaredge/{name}")))
+
+
+def test_pull_runs_pipeline_silently_so_report_shows_the_day(cfg, factory, load_fixture, tmp_path, capsys):
+    """I6/R25: `pull` persists the day and syncs faults like the scheduler, sends nothing,
+    and the README's next step (`report --dry-run`) then shows the figures."""
+    from solya.clock import FixedClock
+    from solya.models import OutboxEntry
+
+    cfg = cfg.model_copy(update={"budget_min_interval_seconds": 0})
+    _pull_setup(cfg, factory)
+    clock = FixedClock(PULL_NOW)
+    with respx.mock:
+        _mock_farm(load_fixture)
+        assert main(["pull", "--site", str(FARM)], settings=cfg, clock=clock) == 0
+    with session_scope(factory) as s:
+        assert s.get(DailyMetric, (FARM, DAY)).production_wh == 316990.0
+        (rec,) = s.scalars(select(FaultRecord)).all()
+        assert rec.code == "FAN_ALERT_1" and rec.notified_at is None  # the service alerts later
+        assert s.scalars(select(OutboxEntry)).all() == []
+    capsys.readouterr()
+    with respx.mock(assert_all_called=False):
+        assert main(["report", "--owner", "1", "--date", "2026-11-24", "--dry-run",
+                     "--out", str(tmp_path)], settings=cfg, clock=clock) == 0
+    out = capsys.readouterr().out
+    assert "317.0" in out and "142.65" in out
+
+
+def test_pull_notify_sends(cfg, factory, load_fixture, monkeypatch):
+    import solya.app as app_mod
+    from solya.clock import FixedClock
+
+    from conftest import FakeChannel
+
+    channel = FakeChannel()
+    real = app_mod.build_container
+    monkeypatch.setattr(app_mod, "build_container",
+                        lambda settings, clock=None: real(settings, clock=clock, channel=channel))
+    cfg = cfg.model_copy(update={"budget_min_interval_seconds": 0})
+    _pull_setup(cfg, factory)
+    with respx.mock:
+        _mock_farm(load_fixture)
+        assert main(["pull", "--site", str(FARM), "--notify"], settings=cfg,
+                    clock=FixedClock(PULL_NOW)) == 0
+    assert [m.kind for m in channel.sent] == ["fault"]

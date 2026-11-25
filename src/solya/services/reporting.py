@@ -206,16 +206,25 @@ class Reporter:
     async def midday_check(self, site_id: int) -> None:
         await self._pull_and_process(site_id, "midday", None)
 
-    async def _pull_and_process(self, site_id: int, kind: str, local_date: date | None) -> None:
+    async def manual_pull(self, site_id: int, kind: str, notify: bool = False) -> PullBundle | None:
+        """R25: the admin ``pull`` command. The same pipeline as the scheduled pulls
+        (DailyMetric, fault records); with ``notify`` False nothing is sent, no retry is
+        scheduled and the comm state is left for the service to change and announce.
+        Returns None when the pull was skipped (unknown or inactive site, auth, budget)."""
+        return await self._pull_and_process(site_id, kind, None, notify=notify)
+
+    async def _pull_and_process(
+        self, site_id: int, kind: str, local_date: date | None, notify: bool = True
+    ) -> PullBundle | None:
         now = self._clock.now()
         with session_scope(self._sf) as s:
             site = s.get(Site, site_id)
             if site is None:
                 log.warning("%s pull: unknown site %s", kind, site_id)
-                return
+                return None
             if site.status != "active":
                 log.info("%s pull skipped for site %s (status %s)", kind, site_id, site.status)
-                return
+                return None
             tz = site.tz
             # R1: the evening status window covers the whole daylight period.
             daylight = True if kind == "evening" else is_daylight(site, now)
@@ -226,17 +235,19 @@ class Reporter:
             bundle = await pull_site(self._client, self._sf, self._clock, site_id, kind, local_date)
         except AuthExpired:
             log.warning("site %s needs re-authorization; %s pull skipped", site_id, kind)
-            return
+            return None
         except BudgetExceeded:
             log.warning("site %s: credit budget exceeded; %s pull skipped", site_id, kind)
-            return
+            return None
         if bundle.errors:
             log.warning("site %s %s pull incomplete: %s", site_id, kind, sorted(bundle.errors))
         if kind == "midday" and _budget_refused(bundle):
             log.warning("site %s: credit budget exceeded; midday check skipped", site_id)
-            return
+            return None
 
-        outgoing, no_data = self._process(site_id, kind, local_date, bundle, daylight)
+        outgoing, no_data = self._process(site_id, kind, local_date, bundle, daylight, notify)
+        if not notify:
+            return bundle
         for msg, stamp in outgoing:
             await self._send(msg, stamp)
 
@@ -246,9 +257,11 @@ class Reporter:
                 self.schedule_retry(site_id, self._clock.now() + RETRY_DELAY)
             except Exception:
                 log.exception("could not schedule retry pull for site %s", site_id)
+        return bundle
 
     def _process(
-        self, site_id: int, kind: str, local_date: date, bundle: PullBundle, daylight: bool
+        self, site_id: int, kind: str, local_date: date, bundle: PullBundle, daylight: bool,
+        notify: bool = True,
     ) -> tuple[list[Outgoing], bool]:
         now = self._clock.now()
         stale_after = self._settings.stale_after_minutes
@@ -279,9 +292,10 @@ class Reporter:
                 persist_site_day(s, day, local_date, lifetime_wh, as_of, computed_at=now)
                 no_data = day.state == "no_data"
 
-            comm = self._comm_transition(site, bundle, now)
+            # A silent pull leaves the transition to the service, which announces it.
+            comm = self._comm_transition(site, bundle, now) if notify else None
 
-            if not owner.active:
+            if not notify or not owner.active:
                 return [], no_data
             chat, name = str(owner.telegram_chat_id), owner.display_name
             fault_label = label if count > 1 else None

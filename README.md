@@ -90,7 +90,7 @@ Run inside the running container (`docker compose exec solya solya <command>`). 
 | `sites set --site ID [options]` | Options: `--label`, `--card-name`, `--tariff`, `--income-basis production\|export`, `--kwp`, `--commercial` / `--no-commercial`, `--check-times 12:30,15:00`, `--status active\|paused`. |
 | `credits` | Credits used this cycle against the cap, usage per site over the last 30 days, and an estimated cost at $0.005 per credit. |
 | `report --owner ID [--date YYYY-MM-DD] --dry-run --out out/` | Builds the evening report from stored data only. Writes the PNG and prints the text. Sends nothing and makes no API calls. |
-| `pull --site ID [--kind evening\|midday]` | A manual live pull. Uses credits. Prints the parsed result. The raw responses are stored like any other pull. |
+| `pull --site ID [--kind evening\|midday] [--notify]` | Pulls one site from the live API now and processes it exactly like the scheduled pull: stores the raw responses, saves the day's figures (evening kind) and updates fault records. Uses credits. Prints the parsed result. Sends no Telegram messages unless `--notify` is given; faults it records are alerted by the service's next pull. |
 | `replay --site ID --date YYYY-MM-DD [--dry-run]` | Re-parses the stored raw responses for that local day and recomputes the daily figures and prints the detected faults. Makes no API calls. See the note below. |
 
 `replay` writes the recomputed daily row only. It prints the faults it detects but never creates, closes or alerts on fault records. Use `--dry-run` to save nothing at all.
@@ -106,7 +106,9 @@ Do this after both sites are connected, before trusting the numbers.
    docker compose exec solya solya pull --site 4552265 --kind evening
    ```
 
-   A pull makes up to 6 API calls (site, overview, alerts, inverter status, lifetime energy, and devices when the device list is old), which count against the 2,000 monthly credits. The response is the parsed data and the raw responses are saved.
+   Run it after sunset, so the day is complete. A pull makes up to 6 API calls (site, overview, alerts, inverter status, lifetime energy, and devices when the device list is old), which count against the 2,000 monthly credits. The calls are spaced 7.5 seconds apart, so one pull takes under a minute.
+
+   The pull is processed like the evening job: the day's figures are saved and fault records updated, so the report in step 3 shows them. It sends nothing to Oren (pass `--notify` to send the alerts it finds). It prints the parsed data, and the raw responses are saved.
 2. Compare with the SolarEdge portal for the same site and day: production total, export, last update time, open alerts and the inverter list. Production and income must match the portal to rounding.
 3. Build the report without sending it and look at the card:
 

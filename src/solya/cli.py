@@ -326,25 +326,33 @@ def cmd_replay(args, settings: Settings, clock: Clock) -> int:
 
 
 def cmd_pull(args, settings: Settings, clock: Clock) -> int:
+    """R25: the scheduler's pull pipeline (DailyMetric, faults); silent unless --notify."""
     from solya.app import build_container
-    from solya.ingest import pull_site
+    from solya.messaging.telegram import TelegramChannel
 
     container = build_container(settings, clock=clock)
+    bot = container.bot_app.bot if args.notify and isinstance(container.channel, TelegramChannel) else None
 
-    async def go() -> PullBundle:
+    async def go() -> PullBundle | None:
         try:
             with session_scope(container.session_factory) as s:
-                site = _site_or_fail(s, args.site)
-                tz = site.tz
-            local_date = clock.now().astimezone(ZoneInfo(tz)).date()
-            return await pull_site(
-                container.client, container.session_factory, clock, args.site, args.kind, local_date
-            )
+                _site_or_fail(s, args.site)
+            if bot is not None:
+                await bot.initialize()
+            return await container.reporter.manual_pull(args.site, args.kind, notify=args.notify)
         finally:
+            if bot is not None:
+                await bot.shutdown()
             await container.http.aclose()
+            container.session_factory.kw["bind"].dispose()
 
     bundle = asyncio.run(go())
+    if bundle is None:
+        raise CliError(f"site {args.site} was not pulled (paused, needs re-authorization, "
+                       "or out of credits); see the log")
     print(json.dumps(dataclasses.asdict(bundle), indent=2, ensure_ascii=False, default=str))
+    print("processed like a scheduled pull: day figures and faults saved, "
+          + ("messages sent" if args.notify else "no messages sent"))
     return 0
 
 
@@ -403,9 +411,12 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--out", default="out")
     rp.set_defaults(fn=cmd_report)
 
-    pl = sub.add_parser("pull", help="manual pull from the live API (uses credits)")
+    pl = sub.add_parser(
+        "pull", help="pull and process one site now, like the scheduler (live API, uses credits)")
     pl.add_argument("--site", type=int, required=True)
     pl.add_argument("--kind", choices=["evening", "midday"], default="evening")
+    pl.add_argument("--notify", action="store_true",
+                    help="also send the owner the alerts this pull produces (default: silent)")
     pl.set_defaults(fn=cmd_pull)
 
     rpl = sub.add_parser("replay", help="recompute a day from stored raw responses, no API calls")
