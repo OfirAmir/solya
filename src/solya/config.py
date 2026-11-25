@@ -2,8 +2,11 @@ import hashlib
 import hmac
 from functools import lru_cache
 
-from pydantic import AnyHttpUrl, SecretStr
-from pydantic_settings import BaseSettings, SettingsConfigDict
+import json
+from typing import Annotated
+
+from pydantic import AnyHttpUrl, SecretStr, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -37,12 +40,22 @@ class Settings(BaseSettings):
     default_timezone: str = "Asia/Jerusalem"
     session_secret: SecretStr | None = None
     admin_password: SecretStr | None = None
-    trusted_proxies: list[str] = ["127.0.0.1"]
+    trusted_proxies: Annotated[list[str], NoDecode] = ["127.0.0.1"]
     llm_enabled: bool = False
     llm_base_url: str = "https://openrouter.ai/api/v1"
     llm_api_key: SecretStr | None = None
     llm_model: str | None = None
     llm_monthly_tokens_per_owner: int = 50000
+
+    @field_validator("trusted_proxies", mode="before")
+    @classmethod
+    def _split_proxies(cls, v):
+        if isinstance(v, str):
+            v = v.strip()
+            if v.startswith("["):
+                return json.loads(v)
+            return [p.strip() for p in v.split(",") if p.strip()]
+        return v
 
     def effective_session_secret(self) -> bytes:
         if self.session_secret is not None:

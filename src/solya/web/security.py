@@ -27,7 +27,9 @@ def cookie_params(public_base_url: str, max_age: int) -> dict:
 
 
 class Sessions:
-    def __init__(self, secret: bytes, clock: Clock | None = None) -> None:
+    def __init__(
+        self, secret: bytes, clock: Clock | None = None, admin_password: str | None = None
+    ) -> None:
         self._secret = secret
         clock = clock or SystemClock()
 
@@ -38,8 +40,10 @@ class Sessions:
         self._serializer = URLSafeTimedSerializer(
             secret, salt="solya-session", signer=_Signer
         )
+        # the salt covers the admin password: changing it invalidates admin sessions
+        pw = hashlib.sha256((admin_password or "").encode()).hexdigest()
         self._admin_serializer = URLSafeTimedSerializer(
-            secret, salt="solya-admin", signer=_Signer
+            secret, salt=f"solya-admin:{pw}", signer=_Signer
         )
 
     def issue(self, owner_id: int) -> str:
@@ -75,18 +79,14 @@ class Sessions:
     def check_csrf(self, cookie_value: str | None, token: str | None) -> bool:
         if not cookie_value or not token:
             return False
-        return hmac.compare_digest(self.csrf_token(cookie_value), token)
+        return hmac.compare_digest(self.csrf_token(cookie_value).encode(), token.encode())
 
 
-def client_ip(request, trusted: list[str]) -> str:
-    peer = request.client.host if request.client else "unknown"
-    if peer in trusted:
-        xff = request.headers.get("x-forwarded-for")
-        if xff:
-            first = xff.split(",")[0].strip()
-            if first:
-                return first
-    return peer
+def client_ip(request) -> str:
+    """The peer address. Behind a proxy, uvicorn's ProxyHeadersMiddleware (serve:
+    proxy_headers=True, forwarded_allow_ips) has already rewritten it from
+    X-Forwarded-For for trusted peers; XFF is never parsed here."""
+    return request.client.host if request.client else "unknown"
 
 
 class RateLimiter:

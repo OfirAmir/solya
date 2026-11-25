@@ -43,18 +43,59 @@ def test_csrf_bound_to_session(clock):
     assert not s.check_csrf(None, t)
 
 
-def _req(peer, xff=None):
-    headers = {"x-forwarded-for": xff} if xff else {}
-    client = SimpleNamespace(host=peer) if peer else None
-    return SimpleNamespace(client=client, headers=headers)
-
-
 def test_client_ip_trusted_proxy():
-    trusted = ["127.0.0.1"]
-    assert client_ip(_req("127.0.0.1", "1.2.3.4, 10.0.0.1"), trusted) == "1.2.3.4"
-    assert client_ip(_req("9.9.9.9", "1.2.3.4"), trusted) == "9.9.9.9"
-    assert client_ip(_req("127.0.0.1"), trusted) == "127.0.0.1"
-    assert client_ip(_req(None), trusted) == "unknown"
+    from web_helpers import proxied_client
+
+    def ip(trusted, peer, xff):
+        app = _ip_app()
+        r = proxied_client(app, trusted, peer).get("/", headers={"x-forwarded-for": xff})
+        return r.text
+
+    assert ip(["127.0.0.1"], "127.0.0.1", "1.2.3.4") == "1.2.3.4"
+    # proxy appended the real client; the spoofed left entry is ignored
+    assert ip(["127.0.0.1"], "127.0.0.1", "9.9.9.9, 1.2.3.4") == "1.2.3.4"
+    assert ip(["127.0.0.1"], "8.8.8.8", "1.2.3.4") == "8.8.8.8"
+    assert client_ip(SimpleNamespace(client=None)) == "unknown"
+
+
+def _ip_app():
+    from fastapi import FastAPI, Request, Response
+
+    app = FastAPI()
+
+    @app.get("/")
+    def root(request: Request):
+        return Response(client_ip(request))
+
+    return app
+
+
+def test_csrf_non_ascii_rejected(clock):
+    s = Sessions(SECRET, clock)
+    c = s.issue(1)
+    t = s.csrf_token(c)
+    assert s.check_csrf(c, "é" * len(t)) is False
+    tampered = ("0" if t[0] != "0" else "1") + t[1:]
+    assert s.check_csrf(c, tampered) is False
+
+
+def test_admin_cookie_invalidated_by_password_change(clock):
+    a = Sessions(SECRET, clock, admin_password="one")
+    c = a.issue_admin()
+    assert a.read_admin(c) is True
+    assert Sessions(SECRET, clock, admin_password="two").read_admin(c) is False
+
+
+def test_trusted_proxies_from_env(monkeypatch):
+    from solya.config import Settings
+
+    base = dict(_env_file=None, solaredge_client_id="a", solaredge_client_secret="b",
+                telegram_bot_token="1:t", telegram_bot_username="u",
+                public_base_url="https://x.y", token_encryption_key="k")
+    monkeypatch.setenv("TRUSTED_PROXIES", "127.0.0.1, 10.0.0.5")
+    assert Settings(**base).trusted_proxies == ["127.0.0.1", "10.0.0.5"]
+    monkeypatch.setenv("TRUSTED_PROXIES", '["10.0.0.9"]')
+    assert Settings(**base).trusted_proxies == ["10.0.0.9"]
 
 
 def test_cookie_params_secure_only_on_https():
