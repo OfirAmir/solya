@@ -1,0 +1,58 @@
+# EC2 trial override: Caddy terminates HTTPS in front of Solya, in the same compose network.
+# This is the README step 8 option "Caddy in the same compose file".
+#
+#   docker compose -f docker-compose.yml -f deploy/ec2/docker-compose.caddy.yml up -d
+#
+# setup.sh writes COMPOSE_FILE into /opt/solya/.env, so plain `docker compose ...` run from
+# /opt/solya picks up both files. Relative paths below resolve against the project directory
+# (the folder of the first file, /opt/solya), not against this file's folder.
+#
+# Needs Docker Compose v2.24 or later for `!reset`.
+
+services:
+  solya:
+    # The base file publishes 127.0.0.1:8000. Compose merges `ports` lists by appending, so
+    # leaving it out here would keep that mapping. Reset it: only Caddy reaches the app,
+    # over the compose network. `expose` documents the port without publishing it.
+    ports: !reset []
+    expose:
+      - "8000"
+    environment:
+      # Caddy's fixed address below. Uvicorn trusts X-Forwarded-For only from this peer,
+      # so the real client IP reaches the rate limits and the admin login lockout.
+      # This overrides any TRUSTED_PROXIES line in .env.
+      TRUSTED_PROXIES: '["172.30.0.10"]'
+
+  caddy:
+    image: caddy:2.8.4
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # Read from /opt/solya/.env by compose interpolation. Caddy accepts a full
+      # https://host origin as the site address. No trailing slash.
+      SOLYA_SITE_ADDRESS: ${PUBLIC_BASE_URL:?PUBLIC_BASE_URL must be set in .env}
+    volumes:
+      - ./deploy/ec2/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      default:
+        ipv4_address: 172.30.0.10
+
+networks:
+  default:
+    ipam:
+      config:
+        # Pinned so Caddy's address (and so TRUSTED_PROXIES) never changes. If this range
+        # clashes with another network on the instance, change the subnet, the gateway, the
+        # ipv4_address and TRUSTED_PROXIES together.
+        - subnet: 172.30.0.0/24
+          gateway: 172.30.0.1
+
+volumes:
+  # Certificates and ACME account keys. Keep them: re-issuing on every restart would hit
+  # Let's Encrypt rate limits.
+  caddy_data:
+  caddy_config:

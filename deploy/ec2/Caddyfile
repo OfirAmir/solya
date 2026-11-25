@@ -1,0 +1,10 @@
+# Site address comes from PUBLIC_BASE_URL in /opt/solya/.env, for example
+# https://1-2-3-4.sslip.io (see docker-compose.caddy.yml). Caddy obtains the
+# Let's Encrypt certificate over port 80/443 and redirects HTTP to HTTPS.
+#
+# No `log` directive on purpose: an access log would record the OAuth callback's
+# query string, which carries the authorization code.
+{$SOLYA_SITE_ADDRESS} {
+	encode gzip
+	reverse_proxy solya:8000
+}
