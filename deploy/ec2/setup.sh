@@ -23,7 +23,7 @@ PROJECT="solya-ec2"
 OVERRIDE_REL="deploy/ec2/docker-compose.caddy.yml"
 COMPOSE_FILE_VALUE="docker-compose.yml:${OVERRIDE_REL}"
 EXAMPLE_BASE_URL="https://solya.example.com"
-DEFAULT_SUBNET="172.30.0.0/24"
+DEFAULT_SUBNET="192.168.250.0/24"   # outside 10/8 and 172.16/12, where VPCs usually live
 COMPOSE_MIN="2.24.0"   # `ports: !reset []` in the override needs 2.24+
 COMPOSE_VERSION="${SOLYA_COMPOSE_VERSION:-v2.32.4}"   # used only when the plugin is missing or too old
 BUILDX_VERSION="${SOLYA_BUILDX_VERSION:-v0.20.1}"     # used only when buildx is missing
@@ -50,6 +50,7 @@ OS_CODENAME=""
 HAVE_DOCKER=0
 INSTALLED_DOCKER=0
 IMDS_TOKEN=""
+SUBNET_EXPLICIT=0   # SOLYA_SUBNET came from .env or the environment, not the default
 
 # ----------------------------------------------------------------------------- output
 
@@ -240,17 +241,24 @@ check_ports() {
         unverified=1
     fi
     if (( HAVE_DOCKER )); then
-        local pubs
-        pubs="$(for p in 80 443; do
-                    ro_root docker ps --filter "publish=$p" \
-                        --format '{{.Names}}|{{.Label "com.docker.compose.project"}}|{{.Label "com.docker.compose.service"}}|{{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null || true
-                done | sort -u)"
-        while IFS='|' read -r c proj svc wd; do
-            [[ -n "$c" ]] || continue
-            if [[ "$proj" != "$PROJECT" || "$svc" != caddy || "$wd" != "$INSTALL_DIR" ]]; then
-                bad+=("container '$c' publishes port 80 or 443")
-            fi
-        done <<< "$pubs"
+        # Host ports come from {{.Ports}} ("0.0.0.0:80->80/tcp, ..."). `--filter publish=`
+        # would match container ports instead.
+        local pubs ports host_port_re='(^|, )[^,]*:(80|443)->'
+        if pubs="$(ro_root docker ps \
+                --format '{{.Names}}|{{.Label "com.docker.compose.project"}}|{{.Label "com.docker.compose.service"}}|{{.Label "com.docker.compose.project.working_dir"}}|{{.Ports}}' 2>/dev/null)"; then
+            while IFS='|' read -r c proj svc wd ports; do
+                [[ -n "$c" && "$ports" =~ $host_port_re ]] || continue
+                if [[ "$proj" != "$PROJECT" || "$svc" != caddy || "$wd" != "$INSTALL_DIR" ]]; then
+                    bad+=("container '$c' publishes host port 80 or 443 ($ports)")
+                fi
+            done <<< "$pubs"
+        elif command -v systemctl >/dev/null 2>&1 && ! systemctl is-active --quiet docker 2>/dev/null \
+                && ! systemctl is-active --quiet docker.socket 2>/dev/null; then
+            info "Docker daemon is not running, so no container holds ports 80/443"
+        else
+            stop_check "could not list containers (docker ps failed), so ports 80/443 cannot be checked against other containers"
+            unverified=1
+        fi
     fi
     if (( ${#bad[@]} )); then
         printf '        %s\n' "${bad[@]}" >&2
@@ -350,10 +358,11 @@ NET_CADDY=""
 # can be chosen with SOLYA_SUBNET=... in the environment.
 load_net_settings() {
     local f="$INSTALL_DIR/.env"
-    NET_SUBNET="$(env_get "$f" SOLYA_SUBNET)"; NET_SUBNET="${NET_SUBNET:-${SOLYA_SUBNET:-$DEFAULT_SUBNET}}"
-    valid_cidr "$NET_SUBNET" || die "SOLYA_SUBNET '$NET_SUBNET' is not an IPv4 CIDR like 172.30.0.0/24"
+    NET_SUBNET="$(env_get "$f" SOLYA_SUBNET)"; NET_SUBNET="${NET_SUBNET:-${SOLYA_SUBNET:-}}"
+    if [[ -n "$NET_SUBNET" ]]; then SUBNET_EXPLICIT=1; else NET_SUBNET="$DEFAULT_SUBNET"; fi
+    valid_cidr "$NET_SUBNET" || die "SOLYA_SUBNET '$NET_SUBNET' is not an IPv4 CIDR like 192.168.250.0/24"
     local p="${NET_SUBNET#*/}" net
-    (( p >= 16 && p <= 28 )) || die "SOLYA_SUBNET '$NET_SUBNET': use a prefix between /16 and /28"
+    (( p >= 16 && p <= 27 )) || die "SOLYA_SUBNET '$NET_SUBNET': use a prefix between /16 and /27"
     net=$(( $(ip2int "${NET_SUBNET%/*}") & $(mask_of "$p") ))
     [[ "$(int2ip "$net")/$p" == "$NET_SUBNET" ]] || die "SOLYA_SUBNET '$NET_SUBNET' is not a network address (did you mean $(int2ip "$net")/$p?)"
 
@@ -404,15 +413,26 @@ check_subnet() {
             cidrs_overlap "$cidr" "$NET_SUBNET" && clashes+=("VPC range $cidr")
         done
         info "VPC ranges: $(tr '\n' ' ' <<< "$vpc")"
+    elif (( SUBNET_EXPLICIT )); then
+        warn "could not read the VPC ranges from EC2 metadata; SOLYA_SUBNET=$NET_SUBNET was set explicitly, so the run continues without the VPC part of the overlap check"
     else
-        warn "could not read the VPC ranges from EC2 metadata; that part of the overlap check is skipped"
+        stop_check "could not read the VPC ranges from EC2 metadata (IMDS), so the default subnet $NET_SUBNET cannot be checked against them. Ask the host owner for a free range (VPC, peered VPCs, VPN, Transit Gateway) and pass it explicitly, for example: SOLYA_SUBNET=192.168.251.0/24 $0"
+        unverified=1
     fi
 
     # Routes on the host.
     if command -v ip >/dev/null 2>&1; then
+        local kind
         while IFS= read -r line; do
-            cidr="${line%% *}"
-            [[ "$cidr" == */* ]] || continue
+            # Route types (unreachable, blackhole, ...) come before the destination.
+            read -r kind cidr _ <<< "$line"
+            case "$kind" in
+                unicast|local|broadcast|multicast|throw|unreachable|prohibit|blackhole|nat|anycast) ;;
+                *) cidr="$kind" ;;
+            esac
+            [[ "$cidr" == default ]] && continue
+            # A single-host route has no prefix: count it as /32.
+            [[ "$cidr" == */* ]] || cidr="$cidr/32"
             dev=""
             [[ "$line" =~ \ dev\ ([^ ]+) ]] && dev="${BASH_REMATCH[1]}"
             [[ -n "$own_dev" && "$dev" == "$own_dev" ]] && continue
@@ -445,7 +465,7 @@ check_subnet() {
 
     if (( ${#clashes[@]} )); then
         printf '        %s\n' "${clashes[@]}" >&2
-        stop_check "SOLYA_SUBNET $NET_SUBNET overlaps the networks above. Pick a free private range, for example: SOLYA_SUBNET=192.168.250.0/24 $0. If $ENV_FILE already sets SOLYA_SUBNET, SOLYA_IP_RANGE and SOLYA_CADDY_IP, change SOLYA_SUBNET there and delete the other two lines so they are derived again. See Troubleshooting in deploy/ec2/README.md."
+        stop_check "SOLYA_SUBNET $NET_SUBNET overlaps the networks above. Pick a free private range, for example: SOLYA_SUBNET=192.168.251.0/24 $0. If $ENV_FILE already sets SOLYA_SUBNET, SOLYA_IP_RANGE and SOLYA_CADDY_IP, change SOLYA_SUBNET there and delete the other two lines so they are derived again. See Troubleshooting in deploy/ec2/README.md."
     elif (( ! unverified )); then
         info "subnet $NET_SUBNET: no overlap with VPC ranges, routes or Docker networks"
     fi
@@ -491,9 +511,25 @@ check_no_other_runtime() {
 
 install_docker() {
     if (( HAVE_DOCKER )); then
-        info "docker: present ($(docker --version 2>/dev/null || echo unknown)); it is left as it is"
-        if command -v systemctl >/dev/null 2>&1 && ! systemctl is-active --quiet docker 2>/dev/null; then
-            run_root systemctl start docker
+        local ver
+        ver="$(docker --version 2>/dev/null || echo unknown)"
+        info "docker: present ($ver); it is left as it is"
+        if [[ "$ver" == *[Pp]odman* ]]; then
+            stop_check "'docker' on this host is the podman-docker shim, not Docker Engine. This kit needs Docker Engine and will not replace podman. Talk to the host owner."
+            return
+        fi
+        if ro_root docker info >/dev/null 2>&1; then
+            info "docker daemon: running"
+        elif command -v systemctl >/dev/null 2>&1 && ! systemctl is-active --quiet docker 2>/dev/null; then
+            if ! systemctl cat docker.service >/dev/null 2>&1; then
+                stop_check "docker is on PATH but not running, and there is no docker.service systemd unit to start. This usually means Docker from a snap, or a podman shim. This kit will not change that setup. Talk to the host owner."
+                return
+            fi
+            if (( DRY_RUN )); then
+                run_root systemctl start docker
+            else
+                run_root systemctl start docker || die "systemctl start docker failed. Check: sudo systemctl status docker"
+            fi
         fi
         return
     fi
@@ -633,6 +669,21 @@ fetch_repo() {
     fi
     if [[ -d "$INSTALL_DIR" && ! -w "$INSTALL_DIR" ]]; then
         FSUDO="$SUDO"
+    fi
+    ensure_docker_cfg
+}
+
+# The private DOCKER_CONFIG dir is created by and owned by this user before any root
+# docker command runs, so a root build cannot create (and own) it.
+ensure_docker_cfg() {
+    if [[ ! -d "$DOCKER_CFG" ]]; then
+        if [[ -n "$FSUDO" ]]; then
+            run_root install -d -m 0755 -o "$ME" -g "$MY_GROUP" "$DOCKER_CFG"
+        else
+            run install -d -m 0755 "$DOCKER_CFG"
+        fi
+    elif [[ "$(stat -c %U "$DOCKER_CFG" 2>/dev/null)" != "$ME" ]]; then
+        run_root chown "$ME:$MY_GROUP" "$DOCKER_CFG"
     fi
 }
 

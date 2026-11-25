@@ -40,8 +40,11 @@ Check these in the AWS console before you start.
 - **Other services on the instance:** this is a shared host, so the kit is careful not to disturb what already runs there. `setup.sh` stops before installing anything if:
   - something other than this kit's Caddy already uses port 80 or 443 (for example an existing nginx, Apache or another container);
   - another copy of this kit, started from a different folder, already uses the `solya-ec2` compose project;
-  - the kit's network range (`172.30.0.0/24` by default) overlaps the VPC's ranges, a route on the host, or another Docker network;
+  - the kit's network range (`192.168.250.0/24` by default) overlaps the VPC's ranges, a route on the host, or another Docker network;
+  - the VPC's ranges cannot be read from the EC2 metadata service and you did not choose the range yourself with `SOLYA_SUBNET`;
   - Docker is not installed but another container runtime is (`containerd`, `runc`, `docker.io`, `podman-docker`, or the Docker snap).
+
+  The script can only see this instance's own VPC ranges, routes and Docker networks. It cannot see ranges that reach the VPC from elsewhere: peered VPCs, a VPN, or a Transit Gateway. **Ask the host owner (Ofir) whether `192.168.250.0/24` is used anywhere in those.** If it is, or if you are not sure, pick a range together and pass it on the first run (see "`setup.sh` says the subnet overlaps a network" under Troubleshooting).
 
   If it stops for ports 80/443, do not stop the other service. Talk to the host owner (Ofir) first. The alternative is to put Solya behind the existing web server instead of this kit's Caddy, as in the main README step 8 ("any other proxy"). This kit does not cover that setup.
 - **Docker already installed:** the script leaves it as it is. It does not enable it at boot or add anyone to the `docker` group. If the host's compose plugin is missing or older than 2.24, or buildx is missing, it downloads them, checks their checksums and stores them only for this kit in `/opt/solya/.docker/cli-plugins`. Nothing is installed host-wide.
@@ -178,7 +181,7 @@ These names come from the main README's `.env` table. Set them in `/opt/solya/.e
 | `SESSION_SECRET` | Optional. Signs the web session cookies. When unset it is derived from `TOKEN_ENCRYPTION_KEY`. To set one, use the output of `openssl rand -hex 32`. |
 | `LLM_ENABLED`, `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, `LLM_MONTHLY_TOKENS_PER_OWNER` | Optional AI answers, off by default. Read "Optional AI answers" in the main README before you turn them on, because owners' questions then leave the server. |
 
-Do **not** set `TRUSTED_PROXIES` in `.env`. `docker-compose.caddy.yml` sets it to Caddy's fixed address (`SOLYA_CADDY_IP`, `172.30.0.10` by default), so the real visitor IP reaches the rate limits and the admin login lockout. A value in `.env` is ignored.
+Do **not** set `TRUSTED_PROXIES` in `.env`. `docker-compose.caddy.yml` sets it to Caddy's fixed address (`SOLYA_CADDY_IP`, `192.168.250.10` by default), so the real visitor IP reaches the rate limits and the admin login lockout. A value in `.env` is ignored.
 
 Leave `PUBLIC_BASE_URL`, `TOKEN_ENCRYPTION_KEY`, `COMPOSE_FILE`, `COMPOSE_PROJECT_NAME`, `SOLYA_SUBNET`, `SOLYA_IP_RANGE` and `SOLYA_CADDY_IP` as `setup.sh` wrote them.
 
@@ -295,6 +298,14 @@ Labels, tariffs and the income basis apply from the next pull. Other options (`-
 ```
 
 ## 11. Updating
+
+**Moving from the first version of this kit (commit `ee9d5d3`).** That version used the compose project name `solya` and the subnet `172.30.0.0/24`. If it was ever started on this host, take that stack down first, so its containers stop holding ports 80/443 and its network is removed. The command names only the base compose file on purpose: the new Caddy file needs settings an old `.env` does not have, and `--remove-orphans` still removes the old Caddy container:
+
+```bash
+cd /opt/solya && sudo docker compose -p solya -f docker-compose.yml down --remove-orphans
+```
+
+The database in `/opt/solya/data` is kept. The old Caddy certificate volume is left in place; the new stack fetches a new certificate. The old `.env` keeps its values, but add nothing by hand: `setup.sh` fills the new keys. An old `.env` has no `SOLYA_SUBNET`, so the new default `192.168.250.0/24` is used unless you set one.
 
 Fetch the new code:
 
@@ -425,12 +436,14 @@ The server's clock may be in UTC. That is fine, and you do not need to change th
 
 ### `setup.sh` says the subnet overlaps a network
 
-The kit's Docker network (`172.30.0.0/24` by default) must not overlap the VPC's ranges, a route on the host or another Docker network. Pick a free private range, for example `192.168.250.0/24`. The default VPC uses `172.31.0.0/16`, so avoid that one.
+The kit's Docker network (`192.168.250.0/24` by default) must not overlap the VPC's ranges, a route on the host, another Docker network, or anything reached through a peered VPC, a VPN or a Transit Gateway. Ask the host owner for a free private range, for example `192.168.251.0/24`. Use a prefix between `/16` and `/27`. The default VPC uses `172.31.0.0/16`, so avoid that one.
+
+The same applies when `setup.sh` stops because it cannot read the VPC ranges from the EC2 metadata service: once you have chosen a range with the host owner, passing it explicitly lets the run continue.
 
 On the first run, before `.env` exists, pass the range in front of the command:
 
 ```bash
-SOLYA_SUBNET=192.168.250.0/24 /opt/solya/deploy/ec2/setup.sh
+SOLYA_SUBNET=192.168.251.0/24 /opt/solya/deploy/ec2/setup.sh
 ```
 
 If `.env` already exists, edit `SOLYA_SUBNET` there and delete the `SOLYA_IP_RANGE` and `SOLYA_CADDY_IP` lines. The script derives them again: the upper half of the range for Docker's own addresses, and network + 10 for Caddy, which `TRUSTED_PROXIES` then follows. If the stack ran before, take it down first so the network is recreated:
