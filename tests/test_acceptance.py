@@ -14,7 +14,7 @@ from sqlalchemy import func, inspect, select, text
 from solya.app import build_container
 from solya.clock import FixedClock
 from solya.db import session_scope
-from solya.models import ApiLedger, DailyMetric, FaultRecord, Owner, Site, SiteToken
+from solya.models import ApiLedger, ConnectRequest, DailyMetric, FaultRecord, Owner, Site, SiteToken
 from solya.render import card as card_mod
 from solya.render.card import TOTAL_LABEL, assert_raqm
 from solya.scheduler import plan_day_jobs
@@ -711,3 +711,94 @@ async def test_a10_customer_messages_no_actions(c, load_fixture):
         rec = s.scalars(select(FaultRecord)).one()
         assert rec.acked_at is not None and rec.closed_at is None
         assert s.get(Owner, 1).active is True
+
+
+# ------------------------------------------------------------------ a11: web journey end to end
+
+
+async def test_a11_web_journey_end_to_end(settings, load_fixture, cards, tmp_path):
+    """Invite, web sign-up, SolarEdge consent, price, stub payment, Telegram deep link,
+    then the first evening report. A single-site owner's label is the generic "המערכת"."""
+    from fastapi.testclient import TestClient
+    from pydantic import SecretStr
+
+    from solya.app import create_app
+    from solya.services import onboarding
+    from solya.text import he
+    from solya.text.rtl import rtl_text
+
+    settings.admin_password = SecretStr("correct horse battery")
+    clock = FixedClock(NOW)
+    c = make_container(settings, clock, url=f"sqlite:///{tmp_path}/solya.db")
+    with session_scope(c.session_factory) as s:
+        code = onboarding.create_invite(s, "admin", clock.now())
+    csrf_re = re.compile(r'name="csrf" value="([^"]+)"')
+    try:
+        with respx.mock:
+            respx.post(TOKEN_URL).mock(return_value=httpx.Response(
+                200, json={"access_token": "ACCESS-T", "refresh_token": "REFRESH-T",
+                           "expires_in": 3600}))
+            respx.get(f"{BASE}/sites/{HOME}").mock(return_value=httpx.Response(
+                200, json=load_fixture("solaredge/site_home.json")))
+            with TestClient(create_app(c, start_background=False), base_url="https://testserver",
+                            follow_redirects=False) as tc:
+                csrf = csrf_re.search(tc.get("/").text).group(1)
+                r = tc.post("/signup", data={"name": "אורן סופר", "email": "oren@example.com",
+                                             "phone": "0501234567", "code": code, "csrf": csrf})
+                assert r.status_code == 303 and r.headers["location"] == "/connect-site"
+                r = tc.post("/connect-site", data={"csrf": csrf_re.search(tc.get("/connect-site").text).group(1)})
+                assert r.status_code == 303
+                token = r.headers["location"].rsplit("/", 1)[1]
+                assert tc.get(r.headers["location"]).status_code == 302
+                with session_scope(c.session_factory) as s:
+                    nonce = s.get(ConnectRequest, token).nonce
+                r = tc.get("/oauth/callback", params={"code": "AUTH-CODE", "site_id": HOME,
+                                                      "state": nonce})
+                assert r.status_code == 303 and r.headers["location"] == "/sites"
+                r = tc.post("/sites", data={"site": str(HOME),
+                                            "csrf": csrf_re.search(tc.get("/sites").text).group(1)})
+                assert r.status_code == 303 and r.headers["location"] == "/price"
+                r = tc.post("/pay", data={"csrf": csrf_re.search(tc.get("/price").text).group(1)})
+                assert r.status_code == 303
+                assert tc.get(r.headers["location"]).status_code == 200
+                assert tc.get("/ready").status_code == 200
+                with session_scope(c.session_factory) as s:
+                    owner = s.scalars(select(Owner)).one()
+                    owner_id, link_token = owner.id, owner.link_token
+                    assert owner.telegram_chat_id is None
+                    assert owner.subscription_status == "pending_payment"
+
+                # Telegram: /start <link_token> through the real bot handler.
+                delayed = []
+                c.reporter._delay_send = lambda seconds, factory: delayed.append(factory)
+                upd, ctx, msg = fake_update(CHAT, f"/start {link_token}", args=[link_token])
+                await bot_callbacks(c)["start"](upd, ctx)
+                for factory in delayed:  # WELCOME_2, normally 60 s later
+                    await factory()
+                welcome = [m for m in c.channel.sent if m.kind == "welcome"]
+                texts = [m.text for m in welcome]
+                assert texts[0] == rtl_text(he.WELCOME_1)
+                assert len(texts) >= 2
+
+                # The first evening: pull the home site, then the report.
+                mock_site(load_fixture, HOME)
+                await c.reporter.evening_pull(HOME, DAY)
+                await c.reporter.evening_report(owner_id, DAY)
+                (report,) = sent(c, "report")
+                assert "85.0 קוט״ש" in report.text
+                assert site_line(report.text, "המערכת")
+                assert c.channel.sent.index(report) > c.channel.sent.index(welcome[-1])
+
+                # The admin page shows the owner linked, awaiting payment.
+                with TestClient(create_app(c, start_background=False),
+                                base_url="https://testserver", follow_redirects=False) as admin:
+                    csrf = csrf_re.search(admin.get("/admin/login").text).group(1)
+                    r = admin.post("/admin/login", data={"password": "correct horse battery",
+                                                         "csrf": csrf})
+                    assert r.status_code == 303
+                    page = admin.get("/admin").text
+                row = re.search(r"<tr>(?:(?!</tr>).)*oren@example\.com(?:(?!</tr>).)*</tr>",
+                                page, re.S).group(0)
+                assert "ממתין לתשלום" in row and "<td>כן</td>" in row
+    finally:
+        await close(c)

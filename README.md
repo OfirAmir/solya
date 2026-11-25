@@ -7,6 +7,7 @@ Solya watches SolarEdge solar sites through the SolarEdge Monitoring **V2** API 
 - A rules engine with no LLM computes daily production, income in ₪, communication loss, zero production, open alerts and inverter faults.
 - The evening report is a card image plus a short text, sent about 30 minutes after the owner's latest local sunset. Faults, communication loss and reminders arrive as separate messages.
 - Owners can ask a few fixed questions (today, yesterday, this month, open alerts).
+- Owners can also join through an invite-gated Hebrew web journey: sign up, connect the SolarEdge site, see the price, a payment stub, and a Telegram deep link that links the chat (see "Web journey" below).
 - Admin work is done with the `solya` command line tool. A read-only page at `/admin` (password from `ADMIN_PASSWORD`) lists owners, sites and usage. Logout revokes the admin cookie in memory only: after a restart a copied cookie stays valid until it expires (12 h).
 
 RAY is a pluggable slot and is **disabled** until the real formula is supplied. While `RAY_IMPLEMENTATION` is unset, no RAY circle and no "RAY" word appear anywhere.
@@ -34,6 +35,10 @@ Do these steps in order.
    | `PUBLIC_BASE_URL` | `https://<your-host>`, no trailing path |
    | `TOKEN_ENCRYPTION_KEY` | from step 6 |
    | `ADMIN_CHAT_IDS` | JSON list of Telegram chat ids that get admin notices, for example `[123456789]` |
+   | `ADMIN_PASSWORD` | optional. Password for the read-only `/admin` page. While unset, `/admin` returns 404. Example: `ADMIN_PASSWORD=pick-a-long-passphrase` |
+   | `SESSION_SECRET` | optional. Signs the web session cookies. Defaults to a value derived from `TOKEN_ENCRYPTION_KEY`. Example: the output of `openssl rand -hex 32` |
+   | `TRUSTED_PROXIES` | optional. Reverse-proxy IPs whose `X-Forwarded-For` is trusted, as a JSON list or comma-separated. Default `["127.0.0.1"]`. See step 8. |
+   | `LLM_*` | optional AI answers, off by default. See "Optional AI answers". |
 
    `.env` holds secrets. It is git-ignored and excluded from the Docker image. Never commit it or paste it into chat.
 6. **Generate the encryption key** with `solya genkey` and put it in `.env` as `TOKEN_ENCRYPTION_KEY`. It does not need a configured `.env`:
@@ -58,14 +63,25 @@ Do these steps in order.
        reverse_proxy localhost:8000
    }
    ```
+
+   Caddy sets `X-Forwarded-For` itself. The service resolves the client IP from that header only when the connecting peer is in `TRUSTED_PROXIES`, and the admin login lockout and the sign-up rate limits count per client IP. With Caddy on the same host the default `["127.0.0.1"]` is right. If the proxy connects from another address (another container, a tunnel), list it, for example `TRUSTED_PROXIES=["172.18.0.1"]`; otherwise every visitor looks like the proxy and one attacker can lock everyone out. Never list an address that clients can reach directly.
+
+   The web session cookie is `Secure` and bound to the host in `PUBLIC_BASE_URL`. Open the site only through that exact host: if the browser uses another host name (an alias, a bare IP, `www.`), the cookie is not sent and every journey page redirects back to `/`.
 9. **Create an invite and send it to Oren:**
 
    ```bash
    docker compose exec solya solya invite create
    ```
 
-   It prints `https://t.me/<bot_username>?start=<token>`. The token works once.
-10. **Oren sends `/connect` to the bot once per site** and approves each one at SolarEdge. One approval covers one site, so he does this twice. After each approval the bot confirms in Telegram.
+   It prints two links for the same one-time token:
+
+   ```
+   telegram: https://t.me/<bot_username>?start=<token>
+   web: https://<your-host>/join/<token>
+   ```
+
+   Send the one that suits the person. The Telegram link registers them in the bot directly. The web link opens the sign-up form with the code filled in. The token works once, whichever link is used.
+10. **Oren connects his sites.** Through Telegram he sends `/connect` to the bot once per site** and approves each one at SolarEdge. One approval covers one site, so he does this twice. After each approval the bot confirms in Telegram. (Web sign-ups connect through the web journey below instead.)
 11. **Set labels, tariffs and the rest.** Check the site ids first with `docker compose exec solya solya sites list`, then run the commands below (the ids are Oren's two sites):
 
     ```bash
@@ -75,6 +91,22 @@ Do these steps in order.
 
     Run them as `docker compose exec solya solya sites set ...`. Quote any value with spaces.
 
+## Web journey
+
+A person with an invite can onboard on the web, in Hebrew, with no Telegram step until the end:
+
+1. `/join/<token>` (or `/` with the code typed in): name, email, phone and the invite code. Sign-up uses the invite once and creates a web owner (status `lead`).
+2. `/connect-site`: sends them to SolarEdge to approve one site (the same V2 OAuth as `/connect`). They can add more sites afterwards.
+3. `/sites` then `/price`: they pick which connected sites to monitor and see the price. Status becomes `pending_payment` when they confirm.
+4. `/pay/<id>` is a **stub**. It records the intended amount and shows that nothing was charged and no subscription started. No payment provider is chosen and VAT display is undecided; both are stated on the page.
+5. `/ready` shows a button to `https://t.me/<bot_username>?start=<link_token>`. Sending that `/start` in Telegram links the chat to the owner, sends the welcome messages and plans their reports. Evening reports start the same day if the site is connected in time.
+
+The link token is single use and cleared once the chat is linked. An owner with no linked chat at report time is skipped (nothing is sent, nothing is marked failed) and the others still get theirs. A chat that is already bound to another account is refused.
+
+### Price
+
+The price is 49.97 ₪ per site up to 50 kW plus 1.00 ₪ per kW above 50, rounded half-up to the agora. The power used is `--kwp` (the installed kW kept on the site, `billing_kwp_override`) when set. Otherwise the portal's reported peak power is used and the price is shown as an **estimate** ("הערכה לפי נתוני הפורטל, המחיר הסופי ייקבע לפי ההספק המותקן"), because the portal figure is not used for billing. With neither, the price is shown as unknown. Run `sites set --site ID --kwp N` for each site to make its price final.
+
 ## Admin commands
 
 Run inside the running container (`docker compose exec solya solya <command>`). The CLI uses the same database and `.env` as the service.
@@ -83,7 +115,7 @@ Run inside the running container (`docker compose exec solya solya <command>`). 
 | --- | --- |
 | `serve [--host 0.0.0.0 --port 8000]` | Runs the service (the container's default command). |
 | `genkey` | Prints a new Fernet key. |
-| `invite create` | Prints a one-time Telegram invite link. |
+| `invite create` | Prints a one-time invite as a Telegram link and a web `/join` link. |
 | `owners list` | Lists owners. |
 | `owners set-name --owner ID --name NAME` | Changes the name used in greetings. |
 | `sites list` | Id, owner, portal name, label, card name, commercial, tariff, basis, status, comm state, last update. Never shows tokens. |
@@ -162,14 +194,25 @@ These come from the API recon (section 8) and have not been checked against the 
 - Other inverter brands.
 - The paid deep bill check.
 - WhatsApp. Only the adapter seam exists.
-- A dashboard or any admin UI. Admin is the CLI only.
+- Any editing from the web. The `/admin` page is read-only; changes go through the CLI.
+- Real payments: the pay page is a stub and charges nothing.
 - Free-form Q&A by default. Only the fixed questions are answered unless the optional AI answers below are switched on.
 - Weather inputs. They are only needed for RAY, which is disabled until its formula arrives.
 - Anything that lets a customer message change an account. Inbound messages can only request a connect link, register with an invite, and acknowledge a fault.
 
 ## Optional AI answers
 
-Off by default (`LLM_ENABLED=false`). When you enable it (`LLM_ENABLED=true`, plus `LLM_API_KEY`, `LLM_MODEL`, optionally `LLM_BASE_URL` and `LLM_MONTHLY_TOKENS_PER_OWNER`), a free-form owner message that matches none of the fixed questions is sent, together with up to 31 days of stored site aggregates (date, site label, kWh, income, communication state, open faults), to the configured provider. No email, phone or token is sent. The answer is dropped in favour of the help text if it contains a number that is not in that data. It cannot change anything, and a reply that claims an action (cancel, refund, charge, service call, technician) is also replaced by the help text. The number guard does not catch numbers written as words, and small integers are always treated as grounded because dates appear in the data, so treat AI answers as best-effort.
+Off by default (`LLM_ENABLED=false`). When you enable it (`LLM_ENABLED=true`, plus `LLM_API_KEY`, `LLM_MODEL`, optionally `LLM_BASE_URL` and `LLM_MONTHLY_TOKENS_PER_OWNER`), a free-form owner message that matches none of the fixed questions is sent, together with up to 31 days of stored site aggregates (date, site label, kWh, income, communication state, open faults), to the configured provider. No email, phone or token is sent. The answer is dropped in favour of the help text if it contains a number that is not in that data. It cannot change anything, and a reply that claims an action (cancel, refund, charge, service call, technician) is also replaced by the help text. Usage is capped per owner by `LLM_MONTHLY_TOKENS_PER_OWNER` (default 50000 tokens a month); after that the owner is told the monthly budget for open answers is used, and the summary and alerts keep arriving. Example:
+
+```
+LLM_ENABLED=true
+LLM_BASE_URL=https://openrouter.ai/api/v1
+LLM_API_KEY=sk-...
+LLM_MODEL=<provider model id>
+LLM_MONTHLY_TOKENS_PER_OWNER=50000
+```
+
+Data note: with this on, owners' questions and their stored aggregates leave the system for that provider, so check the provider's terms and tell owners. The number guard does not catch numbers written as words, and small integers are always treated as grounded because dates appear in the data, so treat AI answers as best-effort.
 
 ## Development
 
