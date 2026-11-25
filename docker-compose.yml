@@ -1,0 +1,12 @@
+services:
+  solya:
+    build: .
+    image: solya
+    env_file: .env
+    environment:
+      DATABASE_URL: sqlite:////app/data/solya.db
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8000:8000"
+    restart: unless-stopped

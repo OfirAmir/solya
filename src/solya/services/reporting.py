@@ -95,6 +95,79 @@ def _site_id(site: Site | int) -> int:
     return identity[0] if identity else site.se_site_id
 
 
+def _stored_day(
+    s: Session, site: Site, owner_site_count: int, local_date: date, now: datetime
+) -> SiteDay:
+    day = SiteDay(
+        site_id=site.se_site_id,
+        label=effective_label(site, owner_site_count),
+        card_name=site.card_name or site.portal_name,
+        state="ok",
+        open_faults=open_fault_views(s, site.se_site_id),
+        kwp=site.billing_kwp_override or site.peak_power_kwp_reported,
+    )
+    if site.status == "reauth_needed":
+        day.state = "reauth_needed"
+    elif site.comm_state == "loss":
+        day.state = "comm_loss"
+        day.comm_since = (site.comm_since or now).astimezone(ZoneInfo(site.tz))
+    else:
+        row = s.get(DailyMetric, (site.se_site_id, local_date))
+        if row is None or row.production_wh is None:
+            day.state = "no_data"
+        else:
+            day.production_wh = row.production_wh
+            day.export_wh = row.export_wh
+            day.self_consumption_wh = row.self_consumption_wh
+            day.income_ils = row.income_ils
+            day.ray = row.ray
+    return day
+
+
+def _card_row(d: SiteDay) -> CardRow:
+    if d.state != "ok":
+        return CardRow(d.card_name, None, None, CARD_NOTES[d.state])
+    return CardRow(d.card_name, d.production_wh, d.income_ils, None)
+
+
+def build_owner_report(
+    session: Session,
+    owner_id: int,
+    local_date: date,
+    now: datetime,
+    settings: Settings,
+    ray: RayCalculator,
+) -> tuple[CardData, str] | None:
+    """Card data and Hebrew text for an owner's evening report, from stored data only.
+
+    No network access. Returns None when the owner has no unpaused site.
+    """
+    owner = session.get(Owner, owner_id)
+    sites = _owner_sites(session, owner_id)
+    shown = [site for site in sites if site.status != "paused"]
+    if owner is None or not shown:
+        return None
+    days = [_stored_day(session, site, len(sites), local_date, now) for site in shown]
+    local_dt = now.astimezone(ZoneInfo(shown[0].tz))
+    show_total = len(days) > 1 and all(
+        d.state == "ok" and d.production_wh is not None and d.income_ils is not None
+        for d in days
+    )
+    total = None
+    if show_total:
+        total = (
+            sum(d.production_wh for d in days),
+            sum((d.income_ils for d in days), Decimal("0")),
+        )
+    card = CardData(
+        ray=weighted_ray([(d.ray, d.kwp) for d in days]),
+        rows=[_card_row(d) for d in days],
+        total=total,
+        date_label=f"{local_date:%d.%m.%Y}",
+    )
+    return card, he.daily_report(owner.display_name, days, local_dt, show_total)
+
+
 class Reporter:
     def __init__(
         self,
@@ -267,31 +340,12 @@ class Reporter:
             if owner is None or not owner.active:
                 log.info("evening report skipped for inactive or unknown owner %s", owner_id)
                 return
-            sites = _owner_sites(s, owner_id)
-            shown = [site for site in sites if site.status != "paused"]
-            if not shown:
+            built = build_owner_report(s, owner_id, local_date, now, self._settings, self._ray)
+            if built is None:
                 return
-            days = [self._stored_day(s, site, len(sites), local_date, now) for site in shown]
-            chat, name = str(owner.telegram_chat_id), owner.display_name
-            local_dt = now.astimezone(ZoneInfo(shown[0].tz))
+            card, text = built
+            chat = str(owner.telegram_chat_id)
 
-        show_total = len(days) > 1 and all(
-            d.state == "ok" and d.production_wh is not None and d.income_ils is not None
-            for d in days
-        )
-        total = None
-        if show_total:
-            total = (
-                sum(d.production_wh for d in days),
-                sum((d.income_ils for d in days), Decimal("0")),
-            )
-        card = CardData(
-            ray=weighted_ray([(d.ray, d.kwp) for d in days]),
-            rows=[self._card_row(d) for d in days],
-            total=total,
-            date_label=f"{local_date:%d.%m.%Y}",
-        )
-        text = he.daily_report(name, days, local_dt, show_total)
         try:
             png = render_card(card)
         except Exception:
@@ -301,40 +355,6 @@ class Reporter:
         if retry:
             key += ":retry" + (f":{site_id}" if site_id is not None else "")
         await self._send(OutboundMessage(chat, "report", text, png, key))
-
-    def _stored_day(
-        self, s: Session, site: Site, owner_site_count: int, local_date: date, now: datetime
-    ) -> SiteDay:
-        day = SiteDay(
-            site_id=site.se_site_id,
-            label=effective_label(site, owner_site_count),
-            card_name=site.card_name or site.portal_name,
-            state="ok",
-            open_faults=open_fault_views(s, site.se_site_id),
-            kwp=site.billing_kwp_override or site.peak_power_kwp_reported,
-        )
-        if site.status == "reauth_needed":
-            day.state = "reauth_needed"
-        elif site.comm_state == "loss":
-            day.state = "comm_loss"
-            day.comm_since = (site.comm_since or now).astimezone(ZoneInfo(site.tz))
-        else:
-            row = s.get(DailyMetric, (site.se_site_id, local_date))
-            if row is None or row.production_wh is None:
-                day.state = "no_data"
-            else:
-                day.production_wh = row.production_wh
-                day.export_wh = row.export_wh
-                day.self_consumption_wh = row.self_consumption_wh
-                day.income_ils = row.income_ils
-                day.ray = row.ray
-        return day
-
-    @staticmethod
-    def _card_row(d: SiteDay) -> CardRow:
-        if d.state != "ok":
-            return CardRow(d.card_name, None, None, CARD_NOTES[d.state])
-        return CardRow(d.card_name, d.production_wh, d.income_ils, None)
 
     async def retry_pull_and_report(self, site_id: int, local_date: date) -> None:
         await self.evening_pull(site_id, local_date)

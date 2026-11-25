@@ -134,12 +134,16 @@ def configure_logging() -> None:
         logging.getLogger(name).setLevel(logging.WARNING)
 
 
-def main() -> None:  # pragma: no cover
+def serve(settings: Settings, host: str = "0.0.0.0", port: int = 8000) -> None:  # pragma: no cover
     import uvicorn
 
+    configure_logging()
+    app = create_app(build_container(settings))
+    # access log would record the OAuth callback query string (code)
+    uvicorn.run(app, host=host, port=port, access_log=False)
+
+
+def main() -> None:  # pragma: no cover
     from solya.config import get_settings
 
-    configure_logging()
-    app = create_app(build_container(get_settings()))
-    # access log would record the OAuth callback query string (code)
-    uvicorn.run(app, host="0.0.0.0", port=8000, access_log=False)
+    serve(get_settings())
