@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# `docker compose` for the EC2 kit: both compose files, the solya-ec2 project, and the
+# kit's private plugin dir (setup.sh puts compose/buildx there when the host's are missing
+# or too old). Runs docker through sudo unless already root.
+#
+#   /opt/solya/deploy/ec2/compose ps
+#   /opt/solya/deploy/ec2/compose logs -f solya
+#   /opt/solya/deploy/ec2/compose exec solya solya invite create
+set -euo pipefail
+
+dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+sudo=()
+[[ "$(id -u)" -eq 0 ]] || sudo=(sudo)
+
+exec "${sudo[@]}" env DOCKER_CONFIG="$dir/.docker" docker compose \
+    --project-name solya-ec2 --project-directory "$dir" \
+    -f "$dir/docker-compose.yml" -f "$dir/deploy/ec2/docker-compose.caddy.yml" "$@"

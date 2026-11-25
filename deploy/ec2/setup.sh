@@ -4,24 +4,32 @@
 # image built and checked, and the stack (Solya + Caddy with a Let's Encrypt certificate)
 # started. Safe to re-run: it never overwrites a value already set in .env.
 #
-# Supported: Amazon Linux 2023, Ubuntu 22.04 and 24.04. Run as a user who can sudo.
+# Supported: Amazon Linux 2023, Ubuntu 22.04 and 24.04. Run it as your normal user (not
+# root, not through sudo); it calls sudo itself for the privileged steps.
 #
-#   deploy/ec2/setup.sh [--branch NAME] [--ip A.B.C.D] [--repo URL] [--dry-run]
+#   deploy/ec2/setup.sh [--branch NAME] [--ip A.B.C.D] [--repo URL] [--dry-run] [--allow-root]
 #
-# See deploy/ec2/README.md for the full walkthrough.
+# It is written for a host that may run other things: it stops rather than take ports
+# 80/443 from another service, reuse another compose project, overlap a network in use,
+# replace an existing Docker install, or install anything host-wide next to an existing
+# Docker. See deploy/ec2/README.md for the full walkthrough.
 
 set -euo pipefail
 
 DEFAULT_BRANCH="claude/dreamy-turing-jyrdw1"
 DEFAULT_REPO="https://github.com/OfirAmir/solya.git"
 INSTALL_DIR="${SOLYA_DIR:-/opt/solya}"
+PROJECT="solya-ec2"
 OVERRIDE_REL="deploy/ec2/docker-compose.caddy.yml"
 COMPOSE_FILE_VALUE="docker-compose.yml:${OVERRIDE_REL}"
 EXAMPLE_BASE_URL="https://solya.example.com"
+DEFAULT_SUBNET="172.30.0.0/24"
 COMPOSE_MIN="2.24.0"   # `ports: !reset []` in the override needs 2.24+
 COMPOSE_VERSION="${SOLYA_COMPOSE_VERSION:-v2.32.4}"   # used only when the plugin is missing or too old
 BUILDX_VERSION="${SOLYA_BUILDX_VERSION:-v0.20.1}"     # used only when buildx is missing
-PLUGIN_DIR="/usr/local/lib/docker/cli-plugins"
+DOCKER_CFG="$INSTALL_DIR/.docker"                     # private DOCKER_CONFIG, set only in dc/dc_capture
+PLUGIN_DIR="$DOCKER_CFG/cli-plugins"
+IMDS="http://169.254.169.254/latest"
 
 # Keys the service cannot start without, and that only a person can fill.
 REQUIRED_SECRETS=(SOLAREDGE_CLIENT_ID SOLAREDGE_CLIENT_SECRET TELEGRAM_BOT_TOKEN TELEGRAM_BOT_USERNAME)
@@ -30,12 +38,18 @@ BRANCH="$DEFAULT_BRANCH"
 REPO_URL="$DEFAULT_REPO"
 IP_ARG=""
 DRY_RUN=0
+ALLOW_ROOT=0
 
+ME="$(id -un)"
+MY_GROUP="$(id -gn)"
 SUDO=""
 FSUDO=""   # prefix for writes inside INSTALL_DIR when it is not writable by this user
 OS_ID=""
 OS_VERSION=""
 OS_CODENAME=""
+HAVE_DOCKER=0
+INSTALLED_DOCKER=0
+IMDS_TOKEN=""
 
 # ----------------------------------------------------------------------------- output
 
@@ -44,15 +58,26 @@ info() { printf '    %s\n' "$*"; }
 warn() { printf '\n!!  %s\n' "$*" >&2; }
 die()  { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
 
+# A check that must stop a real run. Under --dry-run it only warns, so the rest of the
+# plan is still shown.
+stop_check() {
+    if (( DRY_RUN )); then
+        warn "$* (dry-run continues; a real run stops here)"
+    else
+        die "$*"
+    fi
+}
+
 usage() {
     cat <<EOF
-Usage: $0 [--branch NAME] [--ip A.B.C.D] [--repo URL] [--dry-run]
+Usage: $0 [--branch NAME] [--ip A.B.C.D] [--repo URL] [--dry-run] [--allow-root]
 
   --branch NAME   git branch to deploy (default: $DEFAULT_BRANCH)
   --ip A.B.C.D    public IPv4 to build the sslip.io host from. Wins over the
                   EC2 metadata lookup; needed when IMDSv2 is not reachable.
   --repo URL      git URL to clone (default: $DEFAULT_REPO)
   --dry-run       print the planned actions; change nothing
+  --allow-root    allow running as root (normally refused: run as your own user)
   -h, --help      this help
 EOF
 }
@@ -72,16 +97,32 @@ run_root() {
     if [[ -n "$SUDO" ]]; then run "$SUDO" "$@"; else run "$@"; fi
 }
 
-# docker compose against both files, from the install dir, as root.
+# A read-only command that needs root. Runs in dry-run too, but never prompts there.
+ro_root() {
+    if [[ -z "$SUDO" ]]; then "$@"
+    elif (( DRY_RUN )); then sudo -n "$@"
+    else sudo "$@"
+    fi
+}
+
+# docker compose for this kit, as root: both files, the project name and the private
+# plugin dir. DOCKER_CONFIG is set here only, never for the rest of the host.
 dc() {
-    run_root docker compose --project-directory "$INSTALL_DIR" \
+    run_root env DOCKER_CONFIG="$DOCKER_CFG" docker compose \
+        --project-name "$PROJECT" --project-directory "$INSTALL_DIR" \
         -f "$INSTALL_DIR/docker-compose.yml" -f "$INSTALL_DIR/$OVERRIDE_REL" "$@"
 }
 
-# Same, but for capturing output (never in dry-run; callers guard it). Not echoed.
+# Same, for capturing output; not echoed. Callers never use it in dry-run.
 dc_capture() {
-    ${SUDO:+"$SUDO"} docker compose --project-directory "$INSTALL_DIR" \
+    ${SUDO:+"$SUDO"} env DOCKER_CONFIG="$DOCKER_CFG" docker compose \
+        --project-name "$PROJECT" --project-directory "$INSTALL_DIR" \
         -f "$INSTALL_DIR/docker-compose.yml" -f "$INSTALL_DIR/$OVERRIDE_REL" "$@"
+}
+
+# The compose version root sees with the private plugin dir, or nothing.
+compose_version() {
+    ro_root env DOCKER_CONFIG="$DOCKER_CFG" docker compose version --short 2>/dev/null | sed 's/^v//' || true
 }
 
 # ----------------------------------------------------------------------------- args
@@ -96,6 +137,7 @@ parse_args() {
             --repo)     [[ $# -ge 2 ]] || die "--repo needs a value"; REPO_URL="$2"; shift 2 ;;
             --repo=*)   REPO_URL="${1#*=}"; shift ;;
             --dry-run)  DRY_RUN=1; shift ;;
+            --allow-root) ALLOW_ROOT=1; shift ;;
             -h|--help)  usage; exit 0 ;;
             *) usage >&2; die "unknown argument: $1" ;;
         esac
@@ -116,51 +158,121 @@ detect_os() {
 
     case "$OS_ID:$OS_VERSION" in
         amzn:2023|ubuntu:22.04|ubuntu:24.04) info "OS: $OS_ID $OS_VERSION" ;;
-        *)
-            if (( DRY_RUN )); then
-                warn "unsupported OS '$OS_ID $OS_VERSION' (supported: Amazon Linux 2023, Ubuntu 22.04/24.04). Dry-run continues; a real run would stop here."
-            else
-                die "unsupported OS '$OS_ID $OS_VERSION'. Supported: Amazon Linux 2023, Ubuntu 22.04, Ubuntu 24.04."
-            fi
-            ;;
+        *) stop_check "unsupported OS '$OS_ID $OS_VERSION'. Supported: Amazon Linux 2023, Ubuntu 22.04, Ubuntu 24.04." ;;
     esac
 }
 
 setup_sudo() {
     if [[ "$(id -u)" -eq 0 ]]; then
+        (( ALLOW_ROOT )) || die "do not run this as root or through sudo. Run it as your normal user (it calls sudo itself), or pass --allow-root if you really mean root."
         SUDO=""
+        info "running as root (--allow-root)"
     else
-        command -v sudo >/dev/null 2>&1 || die "not root and sudo is not installed"
+        command -v sudo >/dev/null 2>&1 || die "sudo is not installed"
         SUDO="sudo"
         if (( ! DRY_RUN )); then
             sudo -v || die "this user cannot sudo"
+        elif ! sudo -n true 2>/dev/null; then
+            info "(sudo needs a password; dry-run skips the checks that need root)"
         fi
     fi
+    command -v docker >/dev/null 2>&1 && HAVE_DOCKER=1 || HAVE_DOCKER=0
 }
 
 check_resources() {
     local mem_kb avail_kb
     mem_kb="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
     if [[ -n "$mem_kb" ]] && (( mem_kb > 0 && mem_kb < 900000 )); then
-        warn "only $(( mem_kb / 1024 )) MB RAM. About 1 GB is the minimum; the image build may fail. Consider a larger instance or adding swap."
+        warn "only $(( mem_kb / 1024 )) MB RAM. About 1 GB is the minimum; the image build may fail."
     fi
     avail_kb="$(df -Pk "$(dirname "$INSTALL_DIR")" 2>/dev/null | awk 'NR==2 {print $4}' || echo 0)"
     if [[ -n "$avail_kb" ]] && (( avail_kb > 0 && avail_kb < 4000000 )); then
         warn "only $(( avail_kb / 1024 )) MB free disk under $(dirname "$INSTALL_DIR"). Plan for about 10 GB."
     fi
+}
+
+# Containers of a compose project, as "name|working_dir|service" lines.
+project_containers() {
+    ro_root docker ps -a --filter "label=com.docker.compose.project=$PROJECT" \
+        --format '{{.Names}}|{{.Label "com.docker.compose.project.working_dir"}}|{{.Label "com.docker.compose.service"}}' 2>/dev/null
+}
+
+check_project() {
+    (( HAVE_DOCKER )) || return 0
+    local lines line name wd clash=0
+    if ! lines="$(project_containers)"; then
+        info "(could not list containers: no passwordless sudo, or the Docker daemon is stopped; project check skipped)"
+        return 0
+    fi
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        name="${line%%|*}"; wd="${line#*|}"; wd="${wd%%|*}"
+        if [[ "$wd" != "$INSTALL_DIR" ]]; then
+            stop_check "container '$name' belongs to compose project '$PROJECT' but was started from '$wd', not $INSTALL_DIR. Another copy of this kit runs on this host; do not touch it. Talk to whoever runs it."
+            clash=1
+        fi
+    done <<< "$lines"
+    (( clash )) || info "compose project '$PROJECT': free or ours"
+}
+
+# Ports 80/443 must be free, or held only by this checkout's Caddy.
+check_ports() {
+    local bad=() names line c proj svc wd unverified=0
     if command -v ss >/dev/null 2>&1; then
         local listeners
-        listeners="$(ss -ltnH 2>/dev/null | awk '{print $4}' | grep -E '(^|[:.])(80|443)$' || true)"
+        listeners="$(ss -ltnH '( sport = :80 or sport = :443 )' 2>/dev/null || true)"
         if [[ -n "$listeners" ]]; then
-            warn "something already listens on port 80 or 443:"
-            # shellcheck disable=SC2086  # one address per line
-            printf '        %s\n' $listeners >&2
-            info "If that is not this stack's Caddy (from an earlier run), stop it, or Caddy cannot start."
+            if ! names="$(ro_root ss -ltnpH '( sport = :80 or sport = :443 )' 2>/dev/null)"; then
+                stop_check "something listens on port 80 or 443 and its owner cannot be checked without sudo"
+                names=""; unverified=1
+            fi
+            while IFS= read -r line; do
+                [[ -n "$line" ]] || continue
+                if [[ "$line" =~ \(\(\"([^\"]+)\" ]]; then
+                    [[ "${BASH_REMATCH[1]}" == docker-proxy ]] || bad+=("$(awk '{print $4}' <<< "$line") held by ${BASH_REMATCH[1]}")
+                else
+                    bad+=("$(awk '{print $4}' <<< "$line") held by an unknown process")
+                fi
+            done <<< "$names"
         fi
+    else
+        stop_check "the 'ss' tool (package iproute2) is missing, so ports 80/443 cannot be checked. Install iproute2 and re-run."
+        unverified=1
+    fi
+    if (( HAVE_DOCKER )); then
+        local pubs
+        pubs="$(for p in 80 443; do
+                    ro_root docker ps --filter "publish=$p" \
+                        --format '{{.Names}}|{{.Label "com.docker.compose.project"}}|{{.Label "com.docker.compose.service"}}|{{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null || true
+                done | sort -u)"
+        while IFS='|' read -r c proj svc wd; do
+            [[ -n "$c" ]] || continue
+            if [[ "$proj" != "$PROJECT" || "$svc" != caddy || "$wd" != "$INSTALL_DIR" ]]; then
+                bad+=("container '$c' publishes port 80 or 443")
+            fi
+        done <<< "$pubs"
+    fi
+    if (( ${#bad[@]} )); then
+        printf '        %s\n' "${bad[@]}" >&2
+        stop_check "ports 80/443 are in use by another service (above). This kit needs both for Caddy and the certificate, and will not take them from another service. Talk to the host owner, or put Solya behind the existing proxy instead (main README step 8, \"any other proxy\")."
+    elif (( ! unverified )); then
+        info "ports 80/443: free or held by this kit's Caddy"
     fi
 }
 
-# ----------------------------------------------------------------------------- public IP
+# ----------------------------------------------------------------------------- public IP and networks
+
+ip2int() {
+    local IFS=.
+    # shellcheck disable=SC2086
+    set -- $1
+    printf '%s' $(( (10#$1 << 24) | (10#$2 << 16) | (10#$3 << 8) | 10#$4 ))
+}
+
+int2ip() {
+    local n="$1"
+    printf '%s.%s.%s.%s' $(( (n >> 24) & 255 )) $(( (n >> 16) & 255 )) $(( (n >> 8) & 255 )) $(( n & 255 ))
+}
 
 valid_ipv4() {
     local ip="$1" o
@@ -168,19 +280,43 @@ valid_ipv4() {
     for o in "${BASH_REMATCH[@]:1}"; do (( 10#$o <= 255 )) || return 1; done
 }
 
+valid_cidr() {
+    [[ "$1" == */* ]] || return 1
+    local p="${1#*/}"
+    valid_ipv4 "${1%/*}" && [[ "$p" =~ ^[0-9]{1,2}$ ]] && (( p <= 32 ))
+}
+
+mask_of() {  # prefix length -> netmask int
+    local p="$1"
+    (( p == 0 )) && { printf 0; return; }
+    printf '%s' $(( (0xFFFFFFFF << (32 - p)) & 0xFFFFFFFF ))
+}
+
+cidrs_overlap() {  # two CIDRs share at least one address
+    local pa="${1#*/}" pb="${2#*/}" p m
+    p=$(( pa < pb ? pa : pb ))
+    m="$(mask_of "$p")"
+    (( ( $(ip2int "${1%/*}") & m ) == ( $(ip2int "${2%/*}") & m ) ))
+}
+
+ip_in_cidr() {
+    local m
+    m="$(mask_of "${2#*/}")"
+    (( ( $(ip2int "$1") & m ) == ( $(ip2int "${2%/*}") & m ) ))
+}
+
 is_private_ipv4() {
     [[ "$1" =~ ^10\. || "$1" =~ ^192\.168\. || "$1" =~ ^172\.(1[6-9]|2[0-9]|3[01])\. || "$1" =~ ^127\. || "$1" =~ ^169\.254\. ]]
 }
 
-imds_public_ip() {
-    local token
-    token="$(curl -fsS --noproxy '*' --max-time 3 -X PUT \
-        -H 'X-aws-ec2-metadata-token-ttl-seconds: 300' \
-        http://169.254.169.254/latest/api/token 2>/dev/null)" || return 1
-    [[ -n "$token" ]] || return 1
-    curl -fsS --noproxy '*' --max-time 3 \
-        -H "X-aws-ec2-metadata-token: $token" \
-        http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null
+imds_get() {  # path under /latest/ ; empty on failure
+    if [[ -z "$IMDS_TOKEN" ]]; then
+        IMDS_TOKEN="$(curl -fsS --noproxy '*' --max-time 3 -X PUT \
+            -H 'X-aws-ec2-metadata-token-ttl-seconds: 300' "$IMDS/api/token" 2>/dev/null)" || IMDS_TOKEN=""
+        [[ -n "$IMDS_TOKEN" ]] || { IMDS_TOKEN="-"; return 1; }
+    fi
+    [[ "$IMDS_TOKEN" != "-" ]] || return 1
+    curl -fsS --noproxy '*' --max-time 3 -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" "$IMDS/$1" 2>/dev/null
 }
 
 PUBLIC_IP=""
@@ -191,7 +327,7 @@ resolve_ip() {
     if [[ -n "$IP_ARG" ]]; then
         PUBLIC_IP="$IP_ARG"
         info "public IP from --ip: $PUBLIC_IP"
-    elif PUBLIC_IP="$(imds_public_ip)" && [[ -n "$PUBLIC_IP" ]]; then
+    elif PUBLIC_IP="$(imds_get meta-data/public-ipv4)" && [[ -n "$PUBLIC_IP" ]]; then
         info "public IP from EC2 metadata (IMDSv2): $PUBLIC_IP"
     else
         die "could not read the public IPv4 from EC2 metadata (IMDSv2). Does the instance have a public IP? Pass it with --ip A.B.C.D (the instance's public IPv4 or Elastic IP)."
@@ -205,14 +341,120 @@ resolve_ip() {
     info "host: $SSLIP_HOST"
 }
 
+NET_SUBNET=""
+NET_RANGE=""
+NET_CADDY=""
+
+# Subnet, dynamic range and Caddy's address: from .env where set, the rest derived from
+# the subnet (range = upper half, Caddy = network + 10). Before .env exists, the subnet
+# can be chosen with SOLYA_SUBNET=... in the environment.
+load_net_settings() {
+    local f="$INSTALL_DIR/.env"
+    NET_SUBNET="$(env_get "$f" SOLYA_SUBNET)"; NET_SUBNET="${NET_SUBNET:-${SOLYA_SUBNET:-$DEFAULT_SUBNET}}"
+    valid_cidr "$NET_SUBNET" || die "SOLYA_SUBNET '$NET_SUBNET' is not an IPv4 CIDR like 172.30.0.0/24"
+    local p="${NET_SUBNET#*/}" net
+    (( p >= 16 && p <= 28 )) || die "SOLYA_SUBNET '$NET_SUBNET': use a prefix between /16 and /28"
+    net=$(( $(ip2int "${NET_SUBNET%/*}") & $(mask_of "$p") ))
+    [[ "$(int2ip "$net")/$p" == "$NET_SUBNET" ]] || die "SOLYA_SUBNET '$NET_SUBNET' is not a network address (did you mean $(int2ip "$net")/$p?)"
+
+    NET_RANGE="$(env_get "$f" SOLYA_IP_RANGE)"
+    NET_RANGE="${NET_RANGE:-$(int2ip $(( net + (1 << (32 - p - 1)) )))/$(( p + 1 ))}"
+    NET_CADDY="$(env_get "$f" SOLYA_CADDY_IP)"
+    NET_CADDY="${NET_CADDY:-$(int2ip $(( net + 10 )))}"
+
+    valid_cidr "$NET_RANGE" || die "SOLYA_IP_RANGE '$NET_RANGE' is not an IPv4 CIDR"
+    valid_ipv4 "$NET_CADDY" || die "SOLYA_CADDY_IP '$NET_CADDY' is not an IPv4 address"
+    if (( ${NET_RANGE#*/} <= p )) || ! ip_in_cidr "${NET_RANGE%/*}" "$NET_SUBNET"; then
+        die "SOLYA_IP_RANGE '$NET_RANGE' must be a smaller range inside SOLYA_SUBNET '$NET_SUBNET'"
+    fi
+    ip_in_cidr "$NET_CADDY" "$NET_SUBNET" || die "SOLYA_CADDY_IP '$NET_CADDY' is outside SOLYA_SUBNET '$NET_SUBNET'"
+    ! ip_in_cidr "$NET_CADDY" "$NET_RANGE" || die "SOLYA_CADDY_IP '$NET_CADDY' is inside SOLYA_IP_RANGE '$NET_RANGE'; pick one outside it"
+    local c
+    c="$(ip2int "$NET_CADDY")"
+    # Docker puts the gateway on the first address of ip_range, so .1 is free, but keep
+    # Caddy off the network address and .1 anyway.
+    (( c > net + 1 )) || die "SOLYA_CADDY_IP '$NET_CADDY' is the network address or .1; pick another"
+    info "network: subnet $NET_SUBNET, dynamic range $NET_RANGE, Caddy $NET_CADDY"
+}
+
+# The pinned subnet must overlap no VPC range, no route and no other Docker network.
+check_subnet() {
+    local clashes=() cidr dev line own_dev="" own_net="" unverified=0
+
+    # This kit's own network (on a re-run) is not a clash, as long as it is the same subnet.
+    if (( HAVE_DOCKER )); then
+        local id
+        id="$(ro_root docker network inspect --format '{{.Id}}' "${PROJECT}_default" 2>/dev/null || true)"
+        if [[ -n "$id" ]]; then
+            own_dev="br-${id:0:12}"
+            own_net="$(ro_root docker network inspect --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}' "${PROJECT}_default" 2>/dev/null || true)"
+            own_net="${own_net%% *}"
+            if [[ -n "$own_net" && "$own_net" != "$NET_SUBNET" ]]; then
+                stop_check "network ${PROJECT}_default exists with subnet $own_net, but SOLYA_SUBNET is $NET_SUBNET. Run '$INSTALL_DIR/deploy/ec2/compose down' first, then re-run."
+            fi
+        fi
+    fi
+
+    # VPC ranges from IMDS.
+    local mac vpc
+    if mac="$(imds_get meta-data/mac)" && [[ -n "$mac" ]] \
+        && vpc="$(imds_get "meta-data/network/interfaces/macs/$mac/vpc-ipv4-cidr-blocks")"; then
+        for cidr in $vpc; do
+            valid_cidr "$cidr" || continue
+            cidrs_overlap "$cidr" "$NET_SUBNET" && clashes+=("VPC range $cidr")
+        done
+        info "VPC ranges: $(tr '\n' ' ' <<< "$vpc")"
+    else
+        warn "could not read the VPC ranges from EC2 metadata; that part of the overlap check is skipped"
+    fi
+
+    # Routes on the host.
+    if command -v ip >/dev/null 2>&1; then
+        while IFS= read -r line; do
+            cidr="${line%% *}"
+            [[ "$cidr" == */* ]] || continue
+            dev=""
+            [[ "$line" =~ \ dev\ ([^ ]+) ]] && dev="${BASH_REMATCH[1]}"
+            [[ -n "$own_dev" && "$dev" == "$own_dev" ]] && continue
+            valid_cidr "$cidr" && cidrs_overlap "$cidr" "$NET_SUBNET" && clashes+=("route $cidr dev ${dev:-?}")
+        done < <(ip -4 route show 2>/dev/null)
+    else
+        stop_check "the 'ip' tool (package iproute2) is missing, so the host's routes cannot be checked against SOLYA_SUBNET. Install iproute2 and re-run."
+        unverified=1
+    fi
+
+    # Every Docker network.
+    if (( HAVE_DOCKER )); then
+        local ids nets name subs
+        if ids="$(ro_root docker network ls -q 2>/dev/null)"; then
+            if [[ -n "$ids" ]]; then
+                # shellcheck disable=SC2086  # one id per word
+                nets="$(ro_root docker network inspect --format '{{.Name}}|{{range .IPAM.Config}}{{.Subnet}} {{end}}' $ids 2>/dev/null || true)"
+                while IFS='|' read -r name subs; do
+                    [[ -n "$name" && "$name" != "${PROJECT}_default" ]] || continue
+                    for cidr in $subs; do
+                        valid_cidr "$cidr" || continue   # skips IPv6
+                        cidrs_overlap "$cidr" "$NET_SUBNET" && clashes+=("Docker network $name ($cidr)")
+                    done
+                done <<< "$nets"
+            fi
+        else
+            info "(could not list Docker networks without sudo; that part of the overlap check is skipped)"
+        fi
+    fi
+
+    if (( ${#clashes[@]} )); then
+        printf '        %s\n' "${clashes[@]}" >&2
+        stop_check "SOLYA_SUBNET $NET_SUBNET overlaps the networks above. Pick a free private range, for example: SOLYA_SUBNET=192.168.250.0/24 $0. If $ENV_FILE already sets SOLYA_SUBNET, SOLYA_IP_RANGE and SOLYA_CADDY_IP, change SOLYA_SUBNET there and delete the other two lines so they are derived again. See Troubleshooting in deploy/ec2/README.md."
+    elif (( ! unverified )); then
+        info "subnet $NET_SUBNET: no overlap with VPC ranges, routes or Docker networks"
+    fi
+}
+
 # ----------------------------------------------------------------------------- packages
 
 version_ge() {  # version_ge A B: A >= B
     [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" == "$2" ]]
-}
-
-compose_version() {
-    docker compose version --short 2>/dev/null | sed 's/^v//' || true
 }
 
 install_git() {
@@ -220,55 +462,70 @@ install_git() {
     log "Installing git"
     case "$OS_ID" in
         amzn)   run_root dnf install -y git ;;
-        ubuntu) run_root apt-get update; run_root apt-get install -y git ;;
+        ubuntu) run_root apt-get update; run_root apt-get install -y --no-remove git ;;
         *)      info "(no package plan for this OS)" ;;
     esac
 }
 
+# Before a fresh Docker install: stop if any other container runtime is already there.
+check_no_other_runtime() {
+    local found=()
+    case "$OS_ID" in
+        ubuntu)
+            local pkgs
+            pkgs="$(dpkg -l containerd runc docker.io podman-docker 2>/dev/null | awk '$1 ~ /^(ii|hi|iU|iF|hU|hF)$/ {print $2}' || true)"
+            [[ -z "$pkgs" ]] || read -r -a found <<< "$(tr '\n' ' ' <<< "$pkgs")"
+            if command -v snap >/dev/null 2>&1 && snap list docker >/dev/null 2>&1; then found+=("snap:docker"); fi
+            ;;
+        amzn)
+            local p
+            for p in podman-docker containerd runc moby-engine; do
+                rpm -q "$p" >/dev/null 2>&1 && found+=("$p")
+            done
+            ;;
+    esac
+    if (( ${#found[@]} )); then
+        stop_check "docker is not on PATH, but these container packages are installed: ${found[*]}. Installing Docker now could replace or break them. Talk to the host owner first."
+    fi
+}
+
 install_docker() {
-    if command -v docker >/dev/null 2>&1; then
-        info "docker: present ($(docker --version 2>/dev/null || echo unknown))"
-    else
-        log "Installing Docker"
-        case "$OS_ID" in
-            amzn)
-                run_root dnf install -y docker
-                ;;
-            ubuntu)
-                local arch
-                arch="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
-                run_root apt-get update
-                run_root apt-get install -y ca-certificates curl
-                run_root install -m 0755 -d /etc/apt/keyrings
-                run_root curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-                run_root chmod a+r /etc/apt/keyrings/docker.asc
-                local line="deb [arch=$arch signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $OS_CODENAME stable"
-                if (( DRY_RUN )); then
-                    info "[dry-run] write '$line' to /etc/apt/sources.list.d/docker.list"
-                else
-                    printf '%s\n' "$line" | ${SUDO:+"$SUDO"} tee /etc/apt/sources.list.d/docker.list >/dev/null
-                fi
-                run_root apt-get update
-                run_root apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-                ;;
-            *) info "(no package plan for this OS)" ;;
-        esac
-    fi
-
-    if command -v systemctl >/dev/null 2>&1; then
-        if systemctl is-active --quiet docker 2>/dev/null && systemctl is-enabled --quiet docker 2>/dev/null; then
-            info "docker service: running and enabled"
-        else
-            run_root systemctl enable --now docker
+    if (( HAVE_DOCKER )); then
+        info "docker: present ($(docker --version 2>/dev/null || echo unknown)); it is left as it is"
+        if command -v systemctl >/dev/null 2>&1 && ! systemctl is-active --quiet docker 2>/dev/null; then
+            run_root systemctl start docker
         fi
+        return
     fi
-
-    local me
-    me="$(id -un)"
-    if [[ "$me" != "root" ]] && ! id -nG "$me" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
-        run_root usermod -aG docker "$me"
-        info "Added $me to the docker group (takes effect at the next login). The guide uses sudo anyway."
-    fi
+    check_no_other_runtime
+    log "Installing Docker"
+    case "$OS_ID" in
+        amzn)
+            run_root dnf install -y docker
+            ;;
+        ubuntu)
+            local arch
+            arch="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
+            run_root apt-get update
+            run_root apt-get install -y --no-remove ca-certificates curl
+            run_root install -m 0755 -d /etc/apt/keyrings
+            run_root curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+            run_root chmod a+r /etc/apt/keyrings/docker.asc
+            local line="deb [arch=$arch signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $OS_CODENAME stable"
+            if (( DRY_RUN )); then
+                info "[dry-run] write '$line' to /etc/apt/sources.list.d/docker.list"
+            else
+                printf '%s\n' "$line" | ${SUDO:+"$SUDO"} tee /etc/apt/sources.list.d/docker.list >/dev/null
+            fi
+            run_root apt-get update
+            run_root apt-get install -y --no-remove docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+            ;;
+        *) info "(no package plan for this OS)" ;;
+    esac
+    INSTALLED_DOCKER=1
+    # Enabled at boot only because this script installed it.
+    command -v systemctl >/dev/null 2>&1 && run_root systemctl enable --now docker
+    (( DRY_RUN )) || HAVE_DOCKER=1
 }
 
 docker_arch() {  # $1 = compose|buildx
@@ -279,36 +536,39 @@ docker_arch() {  # $1 = compose|buildx
     esac
 }
 
-install_plugin_binary() {  # $1 = file name in PLUGIN_DIR, $2 = url, $3 = expected sha256 (may be empty)
+# Download a CLI plugin into the kit's private dir ($INSTALL_DIR/.docker/cli-plugins),
+# never host-wide. Fails closed without a published checksum.
+install_plugin_binary() {  # $1 = file name, $2 = url, $3 = expected sha256
     local name="$1" url="$2" sum="$3"
     if (( DRY_RUN )); then
-        info "[dry-run] download $url, verify its sha256, install as $PLUGIN_DIR/$name"
+        info "[dry-run] download $url, verify its sha256, install as $PLUGIN_DIR/$name (private to this kit)"
         return
     fi
+    [[ "$sum" =~ ^[0-9a-f]{64}$ ]] || die "no published sha256 found for $url; refusing to install it unverified"
+    run ${FSUDO:+"$FSUDO"} install -d -m 0755 "$PLUGIN_DIR"
     local tmp
-    tmp="$(mktemp -d)"
-    curl -fsSL "$url" -o "$tmp/$name" || { rm -rf "$tmp"; die "download failed: $url"; }
-    if [[ -n "$sum" ]]; then
-        printf '%s  %s\n' "$sum" "$tmp/$name" | sha256sum -c --quiet - || { rm -rf "$tmp"; die "checksum mismatch for $url"; }
-    else
-        warn "no checksum published for $url; installed unverified"
+    tmp="$(${FSUDO:+"$FSUDO"} mktemp "$PLUGIN_DIR/.download.XXXXXX")"
+    if ! ${FSUDO:+"$FSUDO"} curl -fsSL "$url" -o "$tmp"; then
+        ${FSUDO:+"$FSUDO"} rm -f "$tmp"; die "download failed: $url"
     fi
-    run_root install -d -m 0755 "$PLUGIN_DIR"
-    run_root install -m 0755 "$tmp/$name" "$PLUGIN_DIR/$name"
-    rm -rf "$tmp"
+    if ! printf '%s  %s\n' "$sum" "$tmp" | sha256sum -c --quiet -; then
+        ${FSUDO:+"$FSUDO"} rm -f "$tmp"; die "checksum mismatch for $url"
+    fi
+    run ${FSUDO:+"$FSUDO"} chmod 0755 "$tmp"
+    run ${FSUDO:+"$FSUDO"} mv -f "$tmp" "$PLUGIN_DIR/$name"
 }
 
 install_compose_plugin() {
     local have
     have="$(compose_version)"
     if [[ -n "$have" ]] && version_ge "$have" "$COMPOSE_MIN"; then
-        info "docker compose: $have (>= $COMPOSE_MIN)"
+        info "docker compose (as root): $have (>= $COMPOSE_MIN)"
         return
     fi
     if [[ -n "$have" ]]; then
-        log "docker compose $have is older than $COMPOSE_MIN; installing $COMPOSE_VERSION"
+        log "docker compose $have is older than $COMPOSE_MIN; installing $COMPOSE_VERSION for this kit only"
     else
-        log "Installing the docker compose plugin $COMPOSE_VERSION"
+        log "Installing the docker compose plugin $COMPOSE_VERSION for this kit only"
     fi
     local a base sum=""
     a="$(docker_arch compose)"
@@ -319,17 +579,17 @@ install_compose_plugin() {
     install_plugin_binary docker-compose "$base/docker-compose-linux-$a" "$sum"
     if (( ! DRY_RUN )); then
         have="$(compose_version)"
-        version_ge "${have:-0}" "$COMPOSE_MIN" || die "docker compose is still '${have:-missing}' after install. An older plugin in ~/.docker/cli-plugins may shadow $PLUGIN_DIR."
-        info "docker compose: $have"
+        version_ge "${have:-0}" "$COMPOSE_MIN" || die "docker compose is still '${have:-missing}' after installing it into $PLUGIN_DIR"
+        info "docker compose (as root): $have"
     fi
 }
 
 install_buildx_plugin() {
-    if docker buildx version >/dev/null 2>&1; then
+    if ro_root env DOCKER_CONFIG="$DOCKER_CFG" docker buildx version >/dev/null 2>&1; then
         info "docker buildx: present"
         return
     fi
-    log "Installing the docker buildx plugin $BUILDX_VERSION (compose build uses it)"
+    log "Installing the docker buildx plugin $BUILDX_VERSION for this kit only (compose build uses it)"
     local a file base sum=""
     a="$(docker_arch buildx)"
     file="buildx-$BUILDX_VERSION.linux-$a"
@@ -345,9 +605,12 @@ install_buildx_plugin() {
 fetch_repo() {
     log "Repository $REPO_URL ($BRANCH) in $INSTALL_DIR"
     if [[ -d "$INSTALL_DIR/.git" ]]; then
-        local git=(git -C "$INSTALL_DIR")
-        if [[ ! -w "$INSTALL_DIR" ]]; then
-            git=(${SUDO:+"$SUDO"} git -c "safe.directory=$INSTALL_DIR" -C "$INSTALL_DIR")
+        local owner git=(git -C "$INSTALL_DIR")
+        owner="$(stat -c %U "$INSTALL_DIR" 2>/dev/null || echo "?")"
+        if [[ "$owner" != "$ME" ]]; then
+            warn "$INSTALL_DIR is owned by '$owner', not '$ME'. The kit expects it to be yours (sudo chown -R $ME: $INSTALL_DIR)."
+            git=(git -c "safe.directory=$INSTALL_DIR" -C "$INSTALL_DIR")
+            [[ -w "$INSTALL_DIR" ]] || git=(${SUDO:+"$SUDO"} "${git[@]}")
         fi
         if (( ! DRY_RUN )) && [[ -n "$("${git[@]}" status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
             die "$INSTALL_DIR has local changes to tracked files. Commit, stash or discard them first (git -C $INSTALL_DIR status)."
@@ -365,9 +628,7 @@ fetch_repo() {
     elif [[ -e "$INSTALL_DIR" && -n "$(ls -A "$INSTALL_DIR" 2>/dev/null)" ]]; then
         die "$INSTALL_DIR exists, is not empty and is not a git checkout. Move it aside first."
     else
-        local me
-        me="$(id -un)"
-        run_root install -d -m 0755 -o "$me" -g "$(id -gn)" "$INSTALL_DIR"
+        run_root install -d -m 0755 -o "$ME" -g "$MY_GROUP" "$INSTALL_DIR"
         run git clone --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
     fi
     if [[ -d "$INSTALL_DIR" && ! -w "$INSTALL_DIR" ]]; then
@@ -377,12 +638,13 @@ fetch_repo() {
 
 # ----------------------------------------------------------------------------- .env
 
-ENV_FILE=""
+ENV_FILE="$INSTALL_DIR/.env"
+ENV_BACKED_UP=0
 
-# Print KEY's value from FILE (last uncommented assignment), quotes stripped.
+# KEY's value in FILE: the last assignment wins (as for env_set), quotes stripped.
 env_get() {
     local file="$1" key="$2" line val
-    [[ -f "$file" ]] || return 0
+    [[ -f "$file" && -r "$file" ]] || return 0
     line="$(grep -E "^[[:space:]]*${key}=" "$file" | tail -n1 || true)"
     [[ -n "$line" ]] || return 0
     val="${line#*=}"
@@ -393,73 +655,108 @@ env_get() {
     printf '%s' "$val"
 }
 
-# Set KEY=VALUE in FILE: replace an existing (empty) KEY= line, else append.
-# Callers only call this when KEY is unset. The value is never printed.
+# Set KEY=VALUE in FILE: replace the LAST KEY= line (the one env_get and dotenv readers
+# use), else append. Atomic: a temp file in the same dir, then mv. The previous file is
+# kept once per run as .env.bak. Callers only call this when KEY is unset. The value is
+# never printed.
 env_set() {
     local file="$1" key="$2" value="$3" label="${4:-$3}"
     if (( DRY_RUN )); then
         info "[dry-run] set $key=$label in $file"
         return
     fi
-    local tmp
-    tmp="$(mktemp)"
+    local dir tmp
+    dir="$(dirname "$file")"
+    tmp="$(${FSUDO:+"$FSUDO"} mktemp "$dir/.env.tmp.XXXXXX")"   # mode 600
     if grep -qE "^[[:space:]]*${key}=" "$file"; then
         KEY="$key" VALUE="$value" awk '
-            BEGIN { k = ENVIRON["KEY"]; v = ENVIRON["VALUE"]; done = 0 }
-            {
-                if (!done && $0 ~ "^[[:space:]]*" k "=") { print k "=" v; done = 1 }
-                else print
-            }' "$file" > "$tmp"
+            BEGIN { k = ENVIRON["KEY"]; v = ENVIRON["VALUE"]; re = "^[[:space:]]*" k "=" }
+            NR == FNR { if ($0 ~ re) last = FNR; next }
+            FNR == last { print k "=" v; next }
+            { print }' "$file" "$file" | ${FSUDO:+"$FSUDO"} tee "$tmp" >/dev/null
     else
-        cat "$file" > "$tmp"
-        [[ -z "$(tail -c1 "$file")" ]] || printf '\n' >> "$tmp"
-        printf '%s=%s\n' "$key" "$value" >> "$tmp"
+        {
+            cat "$file"
+            [[ -z "$(tail -c1 "$file")" ]] || printf '\n'
+            printf '%s=%s\n' "$key" "$value"
+        } | ${FSUDO:+"$FSUDO"} tee "$tmp" >/dev/null
     fi
-    # cat into the file keeps its owner and mode (600)
-    ${FSUDO:+"$FSUDO"} tee "$file" < "$tmp" >/dev/null
-    rm -f "$tmp"
+    if [[ -n "$FSUDO" ]]; then
+        "$FSUDO" chown "$ME:$MY_GROUP" "$tmp"
+    fi
+    ${FSUDO:+"$FSUDO"} chmod 600 "$tmp"
+    if (( ! ENV_BACKED_UP )); then
+        ${FSUDO:+"$FSUDO"} cp -p "$file" "$dir/.env.bak"
+        ${FSUDO:+"$FSUDO"} chmod 600 "$dir/.env.bak"
+        ENV_BACKED_UP=1
+    fi
+    ${FSUDO:+"$FSUDO"} mv -f "$tmp" "$file"
     info "set $key=$label"
 }
 
+# .env is owned by this user and mode 600, checked on every run.
+fix_env_perms() {
+    [[ -f "$ENV_FILE" ]] || return 0
+    local owner
+    owner="$(stat -c %U "$ENV_FILE" 2>/dev/null || echo "?")"
+    if [[ "$owner" != "$ME" ]]; then
+        run_root chown "$ME:$MY_GROUP" "$ENV_FILE"
+    fi
+    if [[ "$(stat -c %a "$ENV_FILE")" != 600 ]]; then
+        run ${FSUDO:+"$FSUDO"} chmod 600 "$ENV_FILE"
+    fi
+}
+
+# Fill KEY only when it is empty (or the template placeholder). Never overwrites: when
+# the value differs from WANT it sets MISMATCH=1 for the caller to report.
+MISMATCH=0
+fill_or_check() {  # key want read_from [placeholder]
+    local key="$1" want="$2" from="$3" placeholder="${4:-}" cur
+    MISMATCH=0
+    cur="$(env_get "$from" "$key")"
+    if [[ -z "$cur" || ( -n "$placeholder" && "$cur" == "$placeholder" ) ]]; then
+        env_set "$ENV_FILE" "$key" "$want"
+    elif [[ "$cur" != "$want" ]]; then
+        MISMATCH=1
+    else
+        info "$key=$cur (already set)"
+    fi
+}
+
 prepare_env() {
-    log "Configuration file $INSTALL_DIR/.env"
-    ENV_FILE="$INSTALL_DIR/.env"
+    log "Configuration file $ENV_FILE"
     local read_from="$ENV_FILE"
 
     if [[ -f "$ENV_FILE" ]]; then
         info ".env exists; only empty keys are filled"
+        fix_env_perms
     else
-        run ${FSUDO:+"$FSUDO"} cp "$INSTALL_DIR/.env.example" "$ENV_FILE"
-        run ${FSUDO:+"$FSUDO"} chmod 600 "$ENV_FILE"
-        read_from="$INSTALL_DIR/.env.example"   # what the copy will contain (dry-run)
+        run ${FSUDO:+"$FSUDO"} install -m 600 "$INSTALL_DIR/.env.example" "$ENV_FILE"
+        [[ -z "$FSUDO" ]] || run_root chown "$ME:$MY_GROUP" "$ENV_FILE"
+        (( ! DRY_RUN )) || read_from="$INSTALL_DIR/.env.example"   # what the copy will contain
     fi
-    if (( ! DRY_RUN )); then read_from="$ENV_FILE"; fi
 
     local cur
     cur="$(env_get "$read_from" PUBLIC_BASE_URL)"
-    if [[ -z "$cur" || "$cur" == "$EXAMPLE_BASE_URL" ]]; then
-        env_set "$ENV_FILE" PUBLIC_BASE_URL "$BASE_URL"
-    elif [[ "${cur%/}" != "$BASE_URL" ]]; then
+    fill_or_check PUBLIC_BASE_URL "$BASE_URL" "$read_from" "$EXAMPLE_BASE_URL"
+    if (( MISMATCH )); then
         warn "PUBLIC_BASE_URL in .env is '$cur', not '$BASE_URL'. Left unchanged (this script never overwrites a value). If the IP changed, edit it by hand and update the SolarEdge app's redirect URI to match."
-    else
-        info "PUBLIC_BASE_URL=$cur (already set)"
     fi
-    if [[ "$cur" == */ ]]; then
-        warn "PUBLIC_BASE_URL ends with '/'. Remove the trailing slash: Caddy uses it as the site address."
-    fi
+    [[ "$cur" != */ ]] || warn "PUBLIC_BASE_URL ends with '/'. Remove the trailing slash: Caddy uses it as the site address."
 
-    # Lets plain `docker compose ...` in /opt/solya use the Caddy override too.
-    cur="$(env_get "$read_from" COMPOSE_FILE)"
-    if [[ -z "$cur" ]]; then
-        env_set "$ENV_FILE" COMPOSE_FILE "$COMPOSE_FILE_VALUE"
-    elif [[ "$cur" != "$COMPOSE_FILE_VALUE" ]]; then
-        warn "COMPOSE_FILE in .env is '$cur', expected '$COMPOSE_FILE_VALUE'. Left unchanged."
-    fi
+    # Plain `docker compose` from $INSTALL_DIR then targets this kit's files and project.
+    fill_or_check COMPOSE_FILE "$COMPOSE_FILE_VALUE" "$read_from"
+    (( ! MISMATCH )) || warn "COMPOSE_FILE in .env is '$(env_get "$read_from" COMPOSE_FILE)', expected '$COMPOSE_FILE_VALUE'. Left unchanged; use deploy/ec2/compose, which ignores it."
+    fill_or_check COMPOSE_PROJECT_NAME "$PROJECT" "$read_from"
+    (( ! MISMATCH )) || stop_check "COMPOSE_PROJECT_NAME in .env is '$(env_get "$read_from" COMPOSE_PROJECT_NAME)'; this kit needs '$PROJECT'. Fix it by hand."
 
-    local tp
-    tp="$(env_get "$read_from" TRUSTED_PROXIES)"
-    if [[ -n "$tp" ]]; then
-        info "Note: TRUSTED_PROXIES in .env is ignored; deploy/ec2/docker-compose.caddy.yml sets it to Caddy's address."
+    # Network values: load_net_settings already read any set in .env and derived the rest.
+    fill_or_check SOLYA_SUBNET "$NET_SUBNET" "$read_from"
+    fill_or_check SOLYA_IP_RANGE "$NET_RANGE" "$read_from"
+    fill_or_check SOLYA_CADDY_IP "$NET_CADDY" "$read_from"
+
+    if [[ -n "$(env_get "$read_from" TRUSTED_PROXIES)" ]]; then
+        info "Note: TRUSTED_PROXIES in .env is ignored; docker-compose.caddy.yml sets it to SOLYA_CADDY_IP ($NET_CADDY)."
     fi
 }
 
@@ -494,7 +791,7 @@ missing_secrets() {
 # ----------------------------------------------------------------------------- stack
 
 build_and_check() {
-    log "Building the image"
+    log "Building the image ($PROJECT)"
     dc build
     log "Checking Pillow's Raqm layout (Hebrew report card)"
     dc run --rm --no-deps -T solya python -c "from solya.render.card import assert_raqm; assert_raqm()"
@@ -511,7 +808,7 @@ wait_for_health() {
         fi
         sleep 5
     done
-    warn "$url did not answer yet. Check: sudo docker compose logs caddy solya (from $INSTALL_DIR). See Troubleshooting in deploy/ec2/README.md."
+    warn "$url did not answer yet. Check: $INSTALL_DIR/deploy/ec2/compose logs caddy solya. See Troubleshooting in deploy/ec2/README.md."
 }
 
 start_stack() {
@@ -536,9 +833,10 @@ summary() {
     info "PUBLIC_BASE_URL:   $BASE_URL"
     info "OAuth redirect URI (register this in the SolarEdge app): $BASE_URL/oauth/callback"
     info "Health check:      $BASE_URL/healthz"
+    info "Compose commands:  $INSTALL_DIR/deploy/ec2/compose <command>   (sudo docker compose for this kit)"
     if [[ -n "$missing" ]]; then
         printf '\n'
-        info "Fill these keys in $INSTALL_DIR/.env (they are empty):"
+        info "Fill these keys in $ENV_FILE (they are empty):"
         for k in $missing; do
             case "$k" in
                 SOLAREDGE_CLIENT_ID|SOLAREDGE_CLIENT_SECRET) info "  $k   (SolarEdge developer app, from Oren)" ;;
@@ -546,7 +844,7 @@ summary() {
                 TELEGRAM_BOT_USERNAME) info "  $k   (BotFather, without the @)" ;;
             esac
         done
-        info "Then re-run this script, or: cd $INSTALL_DIR && sudo docker compose up -d"
+        info "Then re-run this script, or: $INSTALL_DIR/deploy/ec2/compose up -d"
     fi
     local read_from="$ENV_FILE"
     [[ -f "$read_from" ]] || read_from="$INSTALL_DIR/.env.example"
@@ -561,7 +859,7 @@ summary() {
     fi
     if [[ "$started" == 1 ]]; then
         printf '\n'
-        info "Next: cd $INSTALL_DIR && sudo docker compose exec solya solya invite create"
+        info "Next: $INSTALL_DIR/deploy/ec2/compose exec solya solya invite create"
     fi
     (( ! DRY_RUN )) || { printf '\n'; info "Dry-run: nothing was changed."; }
 }
@@ -572,19 +870,27 @@ main() {
     parse_args "$@"
     (( DRY_RUN )) && log "DRY RUN: printing planned actions only"
 
+    # Everything that can refuse runs before anything is installed or changed.
     log "Preflight"
     detect_os
     setup_sudo
     check_resources
     resolve_ip
+    load_net_settings
+    check_project
+    check_ports
+    check_subnet
 
     log "Packages"
     install_git
     install_docker
-    install_compose_plugin
-    install_buildx_plugin
+    if (( INSTALLED_DOCKER && ! DRY_RUN )); then
+        check_subnet   # a fresh Docker brings its own bridge network
+    fi
 
     fetch_repo
+    install_compose_plugin
+    install_buildx_plugin
     prepare_env
     build_and_check
     generate_key_if_missing

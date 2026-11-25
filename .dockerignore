@@ -9,3 +9,6 @@ __pycache__
 *.egg-info
 tests
 docs
+.env.bak
+.env.tmp.*
+.docker
