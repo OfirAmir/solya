@@ -298,3 +298,23 @@ def test_pull_notify_sends(cfg, factory, load_fixture, monkeypatch):
         assert main(["pull", "--site", str(FARM), "--notify"], settings=cfg,
                     clock=FixedClock(PULL_NOW)) == 0
     assert [m.kind for m in channel.sent] == ["fault"]
+
+
+@pytest.mark.parametrize("exc", ["invalid", "other"])
+def test_pull_notify_rejected_token_not_printed(cfg, factory, monkeypatch, capsys, exc):
+    """M1 on the CLI path: PTB's InvalidToken quotes the token; the command must fail
+    with exit code 1 and print neither the token nor its secret half."""
+    from telegram import Bot
+    from telegram.error import InvalidToken, TelegramError
+
+    async def rejected(self):
+        if exc == "invalid":
+            raise InvalidToken("The token `123:SECRET` was rejected by the server.")
+        raise TelegramError("bad things for 123:SECRET")
+
+    monkeypatch.setattr(Bot, "initialize", rejected)
+    _pull_setup(cfg, factory)
+    assert main(["pull", "--site", str(FARM), "--notify"], settings=cfg) == 1
+    out, err = capsys.readouterr()
+    assert "SECRET" not in out and "SECRET" not in err
+    assert "TELEGRAM_BOT_TOKEN" in err

@@ -327,6 +327,8 @@ def cmd_replay(args, settings: Settings, clock: Clock) -> int:
 
 def cmd_pull(args, settings: Settings, clock: Clock) -> int:
     """R25: the scheduler's pull pipeline (DailyMetric, faults); silent unless --notify."""
+    from telegram.error import InvalidToken, TelegramError
+
     from solya.app import build_container
     from solya.messaging.telegram import TelegramChannel
 
@@ -338,7 +340,15 @@ def cmd_pull(args, settings: Settings, clock: Clock) -> int:
             with session_scope(container.session_factory) as s:
                 _site_or_fail(s, args.site)
             if bot is not None:
-                await bot.initialize()
+                try:
+                    await bot.initialize()
+                except InvalidToken:
+                    # PTB's message quotes the token; never print it (M1).
+                    raise CliError("Telegram rejected the bot token: check "
+                                   "TELEGRAM_BOT_TOKEN in .env") from None
+                except TelegramError as exc:
+                    raise CliError(f"could not reach Telegram ({type(exc).__name__}); "
+                                   "check TELEGRAM_BOT_TOKEN in .env and the network") from None
             return await container.reporter.manual_pull(args.site, args.kind, notify=args.notify)
         finally:
             if bot is not None:
