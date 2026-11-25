@@ -197,7 +197,8 @@ async def test_restart_after_sunset_keeps_due_jobs(db, settings):
     d = day.isoformat()
     assert {f"evening_pull:1:{d}", f"evening_report:1:{d}"} <= set(jobs)
     assert jobs[f"evening_pull:1:{d}"].trigger.run_date == start
-    assert jobs[f"evening_report:1:{d}"].trigger.run_date == start
+    # I3: the report waits for the late pull instead of racing it.
+    assert jobs[f"evening_report:1:{d}"].trigger.run_date == start + timedelta(minutes=5)
 
 
 async def test_plan_drops_jobs_older_than_grace(db, settings):
@@ -209,7 +210,21 @@ async def test_plan_drops_jobs_older_than_grace(db, settings):
         s.add(make_site(1))
     svc = SchedulerService(FakeReporter(), db, settings, clock)
     svc.plan_today()
-    ids = {j.id for j in svc.scheduler.get_jobs()}
+    jobs = {j.id: j for j in svc.scheduler.get_jobs()}
     d = day.isoformat()
-    assert f"evening_pull:1:{d}" not in ids  # due 61 min ago: beyond the grace
-    assert f"evening_report:1:{d}" in ids    # due 56 min ago: still within it
+    # The pull is 61 min overdue (beyond the grace) but the report (56 min) is still
+    # due, so I3 runs the pull now and the report 5 minutes later.
+    assert jobs[f"evening_pull:1:{d}"].trigger.run_date == clock.now()
+    assert jobs[f"evening_report:1:{d}"].trigger.run_date == clock.now() + timedelta(minutes=5)
+
+
+async def test_plan_drops_day_once_report_is_beyond_grace(db, settings):
+    day = datetime.now(timezone.utc).astimezone(ZoneInfo(TZ)).date() + timedelta(days=2)
+    site = make_site(1, commercial=True)
+    clock = FixedClock(plan_sunset(site, day) + timedelta(minutes=30 + 61))
+    with session_scope(db) as s:
+        s.add(Owner(id=1, display_name="o", telegram_chat_id=1, created_at=NOW))
+        s.add(make_site(1, commercial=True))
+    svc = SchedulerService(FakeReporter(), db, settings, clock)
+    svc.plan_today()
+    assert svc.scheduler.get_jobs() == []

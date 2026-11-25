@@ -18,7 +18,7 @@ from solya.clock import Clock
 from solya.config import Settings
 from solya.db import SessionFactory, session_scope
 from solya.models import Site
-from solya.rules.comms import BEIT_YITZHAK, sun_times
+from solya.rules.comms import sun_times
 
 if TYPE_CHECKING:
     from solya.services.reporting import Reporter
@@ -27,6 +27,8 @@ log = logging.getLogger(__name__)
 
 MISFIRE_GRACE_SECONDS = 3600
 REMINDER_INTERVAL_MINUTES = 15
+# A report planned late (restart, re-plan) runs this long after its owner's late pulls.
+LATE_REPORT_DELAY = timedelta(minutes=5)
 
 JobKind = Literal["evening_pull", "evening_report", "midday_check"]
 
@@ -113,25 +115,49 @@ class SchedulerService:
         if self.scheduler.running:
             self.scheduler.shutdown(wait=False)
 
-    def plan_today(self) -> None:
+    def plan_today(self, owner_id: int | None = None) -> None:
+        """Schedule today's jobs, for every owner or (R26) only ``owner_id``.
+
+        Idempotent: job ids are stable and ``replace_existing`` is set.
+        """
         now = self._clock.now()
         local_date = now.astimezone(self._tz).date()
+        grace_cutoff = now - timedelta(seconds=MISFIRE_GRACE_SECONDS)
         with session_scope(self._factory) as s:
-            sites = list(s.scalars(select(Site).order_by(Site.se_site_id)).all())
+            stmt = select(Site).order_by(Site.se_site_id)
+            if owner_id is not None:
+                stmt = stmt.where(Site.owner_id == owner_id)
+            sites = list(s.scalars(stmt).all())
+            site_owner = {site.se_site_id: site.owner_id for site in sites}
             specs = plan_day_jobs(sites, local_date, self._settings)
+        reports_due = {
+            spec.target for spec in specs
+            if spec.kind == "evening_report" and spec.run_at > grace_cutoff
+        }
         for spec in specs:
             # R19a: keep jobs that fell due within the misfire grace (e.g. a restart
             # just after sunset) and run them now; outbox dedupe makes re-runs safe.
-            if spec.run_at <= now - timedelta(seconds=MISFIRE_GRACE_SECONDS):
+            # I3: a pull past the grace still runs while its owner's report is due.
+            if spec.run_at <= grace_cutoff and not (
+                spec.kind == "evening_pull" and site_owner[spec.target] in reports_due
+            ):
                 continue
             run_at = max(spec.run_at, now)
+            if spec.kind == "evening_report":
+                # I3: never at the same instant as a late pull; give the pulls time.
+                run_at = max(spec.run_at, now + LATE_REPORT_DELAY)
             job_id = f"{spec.kind}:{spec.target}:{local_date.isoformat()}"
             args: tuple = (spec.target, local_date)
             if spec.kind == "midday_check":
                 job_id += f":{spec.run_at.astimezone(self._tz):%H:%M}"
                 args = (spec.target,)
             self._add(job_id, DateTrigger(run_date=run_at), spec.kind, *args)
-        log.info("planned %d jobs for %s", len(specs), local_date)
+        scope = "" if owner_id is None else f" (owner {owner_id})"
+        log.info("planned %d jobs for %s%s", len(specs), local_date, scope)
+
+    def plan_owner(self, owner_id: int) -> None:
+        """R26: re-plan today's jobs for one owner, e.g. right after a site connects."""
+        self.plan_today(owner_id)
 
     def schedule_retry(self, site_id: int, run_at: datetime) -> None:
         tz = self._settings.default_timezone

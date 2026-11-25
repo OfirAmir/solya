@@ -698,3 +698,36 @@ async def test_late_retry_after_dark_no_false_comm_loss(h, load_fixture):
     assert h.sent("comm_loss") == []
     assert len(h.sent("report")) == 2
     assert h.sent("report")[1].text == REGRESSION
+
+
+async def test_restart_in_grace_report_waits_for_pulls(h, load_fixture, settings, monkeypatch):
+    """I3: after a restart 40 min past sunset, jobs that share a run time run
+    concurrently (as APScheduler would); the report must still see both pulls."""
+    from solya.scheduler import SchedulerService, sunset_utc
+
+    http = h.reporter._client._http
+    real_get = http.get
+
+    async def slow_get(*args, **kwargs):  # network latency, so concurrent jobs interleave
+        await asyncio.sleep(0.01)
+        return await real_get(*args, **kwargs)
+
+    monkeypatch.setattr(http, "get", slow_get)
+
+    with session_scope(h.db) as s:
+        sunset = sunset_utc(s.get(Site, FARM), DAY)
+    h.clock.set(sunset + timedelta(minutes=40))
+    svc = SchedulerService(h.reporter, h.db, settings, h.clock)
+    svc.plan_today()
+    by_time = {}
+    for job in svc.scheduler.get_jobs():
+        by_time.setdefault(job.trigger.run_date, []).append(job)
+    with respx.mock:
+        mock_site(load_fixture, FARM)
+        mock_site(load_fixture, HOME)
+        for run_at in sorted(by_time):
+            h.clock.set(max(run_at, h.clock.now()))
+            await asyncio.gather(*(svc._run(*job.args) for job in by_time[run_at]))
+    (report,) = h.sent("report")
+    assert report.text == REGRESSION
+    assert h.retries == []
