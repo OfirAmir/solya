@@ -35,3 +35,14 @@ def load_fixture():
         return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
 
     return _load
+
+
+@pytest.fixture
+def db():
+    from solya.db import SessionFactory, init_db, make_engine
+
+    engine = make_engine("sqlite:///:memory:")
+    init_db(engine)
+    factory = SessionFactory(bind=engine)
+    yield factory
+    engine.dispose()
