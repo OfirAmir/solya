@@ -6,8 +6,8 @@ What is in this folder:
 
 | File | What it does |
 | --- | --- |
-| `setup.sh` | Installs Docker, fetches the code into `/opt/solya`, prepares `.env`, builds and checks the image, and starts the stack. Safe to run again. |
-| `docker-compose.caddy.yml` | Adds Caddy on ports 80 and 443 and hides Solya's port 8000 from the outside. Uses its own compose project (`solya-ec2`), image tag and network, so it does not collide with anything else on the host. |
+| `setup.sh` | Installs Docker, fetches the code into `/opt/solya`, prepares `.env`, pulls and checks the image, and starts the stack. Safe to run again; it is also how you update. `--build` builds the image locally instead of pulling it. |
+| `docker-compose.caddy.yml` | Adds Caddy on ports 80 and 443 and hides Solya's port 8000 from the outside. Uses its own compose project (`solya-ec2`) and network, runs the image named by `SOLYA_IMAGE`, so it does not collide with anything else on the host. |
 | `compose` | `sudo docker compose` for this kit: both compose files, the `solya-ec2` project and the kit's own plugin folder. Use it for every compose command in this guide. |
 | `Caddyfile` | Caddy's config. The host name comes from `PUBLIC_BASE_URL` in `.env`. |
 
@@ -24,7 +24,7 @@ Throughout this guide:
 
 Check these in the AWS console before you start.
 
-- **Instance size:** at least about 1 GB RAM (for example `t3.micro` or bigger) and 10 GB free disk.
+- **Instance size:** at least about 512 MB RAM (a `t3.micro` with 1 GB is comfortable) and 10 GB free disk. A local build with `--build` wants about 1 GB RAM.
 - **Operating system:** Amazon Linux 2023, Ubuntu 22.04 or Ubuntu 24.04. The script detects which one from `/etc/os-release` and refuses any other.
 - **Security group, inbound rules:**
 
@@ -47,7 +47,8 @@ Check these in the AWS console before you start.
   The script can only see this instance's own VPC ranges, routes and Docker networks. It cannot see ranges that reach the VPC from elsewhere: peered VPCs, a VPN, or a Transit Gateway. **Ask the host owner (Ofir) whether `192.168.250.0/24` is used anywhere in those.** If it is, or if you are not sure, pick a range together and pass it on the first run (see "`setup.sh` says the subnet overlaps a network" under Troubleshooting).
 
   If it stops for ports 80/443, do not stop the other service. Talk to the host owner (Ofir) first. The alternative is to put Solya behind the existing web server instead of this kit's Caddy, as in the main README step 8 ("any other proxy"). This kit does not cover that setup.
-- **Docker already installed:** the script leaves it as it is. It does not enable it at boot or add anyone to the `docker` group. If the host's compose plugin is missing or older than 2.24, or buildx is missing, it downloads them, checks their checksums and stores them only for this kit in `/opt/solya/.docker/cli-plugins`. Nothing is installed host-wide.
+- **Image:** the server runs the published image `ghcr.io/ofiramir/solya:latest` from GitHub Container Registry (built by CI for amd64 and arm64: `latest` follows `main`, `sha-<commit>` pins a commit, `v*` tags give versions). Nothing is built on the instance. The `.env` key `SOLYA_IMAGE` names the image and `setup.sh` fills it in. The instance needs outbound access to `ghcr.io`. If the package is private, log in once with a GitHub token that has `read:packages`, using the kit's own Docker config (see Troubleshooting, "`setup.sh` cannot pull the image"). If GHCR is unreachable, or to try local changes, `setup.sh --build` builds from the checkout instead.
+- **Docker already installed:** the script leaves it as it is. It does not enable it at boot or add anyone to the `docker` group. If the host's compose plugin is missing or older than 2.24, it downloads it (and buildx, only with `--build`), checks their checksums and stores them only for this kit in `/opt/solya/.docker/cli-plugins`. Nothing is installed host-wide.
 
 ## 2. SSH in and run `setup.sh`
 
@@ -76,7 +77,7 @@ sudo install -d -m 0755 -o "$USER" -g "$(id -gn)" /opt/solya
 ```
 
 ```bash
-git clone --branch claude/dreamy-turing-jyrdw1 https://github.com/OfirAmir/solya.git /opt/solya
+git clone --branch main https://github.com/OfirAmir/solya.git /opt/solya
 ```
 
 The repository is public, so no token or password is needed.
@@ -97,11 +98,11 @@ The script:
 
 1. refuses to run as root (pass `--allow-root` only if you really mean it);
 2. runs the safety checks from step 1 (ports 80/443, the compose project, the network range) before it installs anything;
-3. installs git, and Docker only if Docker is not there at all; adds a private compose or buildx plugin if needed;
+3. installs git, and Docker only if Docker is not there at all; adds a private compose plugin if needed (buildx too, only with `--build`);
 4. clones or updates the repository in `/opt/solya` at the branch (`--branch NAME` picks another one);
 5. reads the public IP from the EC2 metadata service (IMDSv2) and builds `<host>` from it;
-6. creates `/opt/solya/.env` (mode 600, owned by you) from `.env.example` if it does not exist, and fills in the empty keys `PUBLIC_BASE_URL=https://<host>`, `COMPOSE_FILE`, `COMPOSE_PROJECT_NAME=solya-ec2`, `SOLYA_SUBNET`, `SOLYA_IP_RANGE` and `SOLYA_CADDY_IP`. Each change is written atomically, and the previous file is kept as `/opt/solya/.env.bak`;
-7. builds the image (`solya-ec2`) and checks that the Hebrew text layout (Raqm) works inside it;
+6. creates `/opt/solya/.env` (mode 600, owned by you) from `.env.example` if it does not exist, and fills in the empty keys `PUBLIC_BASE_URL=https://<host>`, `COMPOSE_FILE`, `COMPOSE_PROJECT_NAME=solya-ec2`, `SOLYA_SUBNET`, `SOLYA_IP_RANGE` and `SOLYA_CADDY_IP` and `SOLYA_IMAGE=ghcr.io/ofiramir/solya:latest`. Each change is written atomically, and the previous file is kept as `/opt/solya/.env.bak`;
+7. pulls the image named by `SOLYA_IMAGE` from GHCR (with `--build` it builds it from the checkout instead, and tags it with that name) and checks that the Hebrew text layout (Raqm) works inside it. If the pull fails it stops and says why; it never falls back to building on its own;
 8. generates `TOKEN_ENCRYPTION_KEY` with `solya genkey` if it is empty;
 9. starts Caddy, and Solya too once the secrets are filled in;
 10. prints the host, the redirect URI and exactly which keys in `.env` are still empty.
@@ -221,7 +222,7 @@ Apply the new `.env`. Run `up -d`, not `restart`: `restart` keeps the old settin
 /opt/solya/deploy/ec2/compose up -d
 ```
 
-Re-running `/opt/solya/deploy/ec2/setup.sh` does the same and also checks the health URL.
+Re-running `/opt/solya/deploy/ec2/setup.sh` does the same, pulls the newest image first and also checks the health URL.
 
 Check that both containers are running:
 
@@ -338,14 +339,18 @@ The database in `/opt/solya/data` is kept. The old Caddy certificate volume is l
 Fetch the new code:
 
 ```bash
-git -C /opt/solya pull --ff-only
+git -C /opt/solya pull
 ```
 
-Then re-run the script. It rebuilds the image, keeps `.env` as it is and recreates the containers:
+Then re-run the script. It pulls the newest `latest` image from GHCR, keeps `.env` as it is and recreates the Solya container when the image changed:
 
 ```bash
 /opt/solya/deploy/ec2/setup.sh
 ```
+
+To stay on a fixed version, set `SOLYA_IMAGE` in `/opt/solya/.env` to a pinned tag, for example `SOLYA_IMAGE=ghcr.io/ofiramir/solya:sha-<commit>` (the short commit from the CI run), and re-run the script. The script never overwrites a value you set. Change it back to `ghcr.io/ofiramir/solya:latest` to follow `main` again.
+
+To build from the checked-out source instead (GHCR unreachable, or testing local changes), run `/opt/solya/deploy/ec2/setup.sh --build`. The result is tagged with the `SOLYA_IMAGE` name, so a later run without `--build` replaces it with the pulled image.
 
 ## 12. Backups
 
@@ -481,6 +486,21 @@ If `.env` already exists, edit `SOLYA_SUBNET` there and delete the `SOLYA_IP_RAN
 ```
 
 Then re-run `/opt/solya/deploy/ec2/setup.sh`.
+
+### `setup.sh` cannot pull the image
+
+The script stops with "could not pull" and does not build on its own. Two usual causes:
+
+- **The package is private** (the error says `denied` or `unauthorized`). Create a GitHub token with the `read:packages` scope and log in once. The kit reads credentials from its own Docker config, so a plain `sudo docker login` is not seen. Use:
+
+```bash
+sudo env DOCKER_CONFIG=/opt/solya/.docker docker login ghcr.io
+```
+
+  Enter your GitHub user name and the token as the password, then re-run `setup.sh`. Alternatively, the repository owner can make the package public in the GitHub package settings.
+- **`ghcr.io` is unreachable** from the instance (egress firewall, no internet route). Fix the network, or run `/opt/solya/deploy/ec2/setup.sh --build` to build from the checkout.
+
+A `not found` error means the tag in `SOLYA_IMAGE` does not exist (for example a mistyped `sha-<commit>`, or CI has not published it yet).
 
 ### `docker compose` says it does not know `!reset`
 
