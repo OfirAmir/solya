@@ -6,7 +6,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Form, HTTPException, Request
@@ -15,6 +15,7 @@ from sqlalchemy import func, select
 
 from solya.db import session_scope
 from solya.models import LlmUsage, Owner, RawResponse, Site
+from solya.services import ai_answers
 from solya.web.journey import (
     FORM_EXPIRED, PRE_COOKIE, PRE_MAX_AGE, _container, _message, templates,
 )
@@ -31,6 +32,7 @@ SUBSCRIPTION_LABELS = {
     "lead": "נרשם", "connected": "מחובר", "pending_payment": "ממתין לתשלום", "active": "פעיל",
 }
 SOURCE_LABELS = {"web": "אתר", "bot": "בוט"}
+LOW_PLAN_NOTE = "תוכנית חסכונית: ללא זיהוי תקלות ממיר"  # spec 5.5
 SITE_STATUS_LABELS = {"active": "פעיל", "reauth_needed": "דורש חיבור מחדש", "paused": "מושהה"}
 DISPLAY_TZ = ZoneInfo("Asia/Jerusalem")
 
@@ -137,9 +139,7 @@ async def admin_page(request: Request):
     c = _container(request)
     now = c.clock.now()
     cycle_start = c.budget.cycle_start()
-    month_start = now.astimezone(timezone.utc).replace(
-        day=1, hour=0, minute=0, second=0, microsecond=0
-    )
+    month_start = ai_answers.month_start(now)  # the AI budget's month (M8)
     rows = []
     with session_scope(c.session_factory) as s:
         last_pull = dict(s.execute(
@@ -169,6 +169,7 @@ async def admin_page(request: Request):
                     "id": x.se_site_id,
                     "monitored": x.monitored,
                     "call_plan": x.call_plan,
+                    "plan_note": LOW_PLAN_NOTE if x.call_plan == "low" else None,
                     "status": SITE_STATUS_LABELS.get(x.status, x.status),
                     "comm_state": x.comm_state,
                 } for x in sites],

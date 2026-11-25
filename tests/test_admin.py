@@ -219,3 +219,35 @@ def test_admin_logout_with_expired_cookie_redirects(tc, container):
     container.clock.advance(timedelta(hours=13))
     r = tc.post("/admin/logout", data={"csrf": "stale"})
     assert r.status_code == 303 and r.headers["location"] == "/admin/login"
+
+
+LOW_PLAN_NOTE = "תוכנית חסכונית: ללא זיהוי תקלות ממיר"
+
+
+def test_admin_states_low_plan_limits(tc, container):
+    """Spec 5.5: the admin page says the low plan does not detect inverter faults."""
+    _seed(container)
+    assert _login(tc).status_code == 303
+    body = tc.get("/admin").text
+    assert body.count(LOW_PLAN_NOTE) == 1  # only site 3033498 is on the low plan
+    start = body.index("הבית של דנה")
+    site = body[start:body.index("</div>", start)]
+    assert LOW_PLAN_NOTE in site
+
+
+def test_admin_ai_tokens_use_the_budget_month(tc, container):
+    """M8: the month starts at midnight Israel time, as the AI budget's does, not UTC."""
+    from datetime import datetime, timezone
+
+    _, b = _seed(container)
+    now = datetime(2026, 12, 1, 10, 0, tzinfo=timezone.utc)
+    container.clock.advance(now - container.clock.now())
+    with session_scope(container.session_factory) as s:
+        s.query(LlmUsage).delete()
+        s.add(LlmUsage(owner_id=b, ts=datetime(2026, 11, 30, 23, 0, tzinfo=timezone.utc),
+                       input_tokens=40, output_tokens=2))  # 01:00 on 1 December in Israel
+        s.add(LlmUsage(owner_id=b, ts=datetime(2026, 11, 30, 21, 0, tzinfo=timezone.utc),
+                       input_tokens=500, output_tokens=0))  # 23:00 on 30 November in Israel
+    assert _login(tc).status_code == 303
+    body = tc.get("/admin").text
+    assert re.search(r"<td>\d+</td>\s*<td>42</td>", body)

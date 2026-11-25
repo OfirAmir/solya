@@ -126,7 +126,8 @@ def claims_action(reply: str) -> bool:
     return any(stem in plain for stem in ACTION_CLAIM_STEMS)
 
 
-def _month_start(now: datetime) -> datetime:
+def month_start(now: datetime) -> datetime:
+    """The start of the AI budget's month: midnight on the 1st, Israel time."""
     local = now.astimezone(ZoneInfo(DEFAULT_TZ))
     return local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
@@ -134,7 +135,7 @@ def _month_start(now: datetime) -> datetime:
 def _used_tokens(session: Session, owner_id: int, now: datetime) -> int:
     total = session.scalar(
         select(func.coalesce(func.sum(LlmUsage.input_tokens + LlmUsage.output_tokens), 0)).where(
-            LlmUsage.owner_id == owner_id, LlmUsage.ts >= _month_start(now)
+            LlmUsage.owner_id == owner_id, LlmUsage.ts >= month_start(now)
         )
     )
     return int(total or 0)

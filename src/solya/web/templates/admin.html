@@ -34,6 +34,7 @@
                 <div class="adm-site">
                   <strong>{{ x.name }}</strong> <bdi>{{ x.id }}</bdi>
                   <span class="note">{{ "במעקב" if x.monitored else "לא במעקב" }} · {{ x.call_plan }} · {{ x.status }} · {{ x.comm_state }}</span>
+                  {% if x.plan_note %}<span class="note">{{ x.plan_note }}</span>{% endif %}
                 </div>
                 {% else %}<span class="note">אין מערכות</span>{% endfor %}
               </td>
