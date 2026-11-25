@@ -369,9 +369,19 @@ async def pay(request: Request, csrf: str = Form("")):
         monitored, agorot, estimate = _monitored_total(s, owner_id)
         if not monitored:
             return RedirectResponse("/sites", status_code=303)
-        payment_id = payments.create_stub_checkout(
-            s, owner_id, agorot, estimate, PAYMENT_DESCRIPTION, c.clock.now()
-        ).id
+        latest = s.scalars(
+            select(Payment)
+            .where(Payment.owner_id == owner_id, Payment.status == "stub_pending")
+            .order_by(Payment.created_at.desc())
+            .limit(1)
+        ).first()
+        if (latest is not None and latest.amount_agorot == agorot
+                and latest.amount_is_estimate == estimate):
+            payment_id = latest.id  # a repeated POST reuses the same pending stub
+        else:
+            payment_id = payments.create_stub_checkout(
+                s, owner_id, agorot, estimate, PAYMENT_DESCRIPTION, c.clock.now()
+            ).id
     return RedirectResponse(f"/pay/{payment_id}", status_code=303)
 
 

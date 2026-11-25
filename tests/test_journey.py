@@ -681,3 +681,36 @@ def test_journey_and_admin_responses_not_cached_or_framed(tc, container):
 def test_static_assets_stay_cacheable(tc):
     r = tc.get("/static/style.css")
     assert r.status_code == 200 and r.headers.get("cache-control") != "no-store"
+
+
+def _payment_count(container) -> int:
+    with session_scope(container.session_factory) as s:
+        return s.scalar(select(func.count()).select_from(Payment))
+
+
+def test_pay_twice_reuses_stub_pending(tc, container):
+    owner_id = _web_owner(tc, container)
+    _add_site(container, owner_id, 111111)
+    csrf = _csrf(tc.get("/price").text)
+    first = tc.post("/pay", data={"csrf": csrf})
+    second = tc.post("/pay", data={"csrf": csrf})
+    assert first.status_code == second.status_code == 303
+    assert first.headers["location"] == second.headers["location"]
+    assert _payment_count(container) == 1
+
+
+def test_pay_after_amount_change_creates_new_payment(tc, container):
+    owner_id = _web_owner(tc, container)
+    _add_site(container, owner_id, 111111)
+    _add_site(container, owner_id, 111112)
+    csrf = _csrf(tc.get("/sites").text)
+    assert tc.post("/sites", data={"site": "111111", "csrf": csrf}).status_code == 303
+    first = tc.post("/pay", data={"csrf": csrf}).headers["location"]
+    container.clock.advance(timedelta(minutes=1))  # the second payment is the latest
+    assert tc.post("/sites", data={"site": ["111111", "111112"], "csrf": csrf}).status_code == 303
+    second = tc.post("/pay", data={"csrf": csrf}).headers["location"]
+    assert first != second
+    assert _payment_count(container) == 2
+    # the latest pending payment matches again, so it is reused
+    assert tc.post("/pay", data={"csrf": csrf}).headers["location"] == second
+    assert _payment_count(container) == 2
