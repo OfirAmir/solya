@@ -12,9 +12,7 @@ from solya.ingest import PullBundle
 from solya.models import FaultRecord, Site
 from solya.rules.comms import is_stale
 from solya.rules.daily import FaultView
-
-FAULT_MODES = {"FAULT"}
-
+from solya.solaredge.parse import is_fault_mode
 
 def _base(key: str) -> str:
     return key.split("@")[0]
@@ -80,8 +78,12 @@ def detect_faults(
 
     if bundle.inverters is not None:
         for serial, state in bundle.inverters.items():
-            mode = state.last_mode
-            if mode and (mode in FAULT_MODES or mode.startswith("LOCKED")):
+            # R24: any fault sample in the window (midnight to now), not only the last.
+            # The detection time stays the pull time (acceptance a7).
+            mode = state.fault_mode
+            if mode is None and is_fault_mode(state.last_mode):
+                mode = state.last_mode
+            if mode is not None:
                 found.append(DetectedFault(f"mode:{serial}", "mode", mode, serial, now))
         if is_daylight:
             for serial in expected_inverters:
@@ -114,7 +116,8 @@ def sync_faults(
     now: datetime,
     data_complete: bool,
 ) -> list[FaultEvent]:
-    """Reconcile detected faults with stored records; never reopens a closed key."""
+    """Reconcile detected faults with stored records. A closed fault seen again opens a
+    new episode under a new key (R13); a closed key itself is never reopened."""
     rows = session.scalars(select(FaultRecord).where(FaultRecord.site_id == site_id)).all()
     keys = {r.key for r in rows}
     open_bases = {_base(r.key) for r in rows if r.closed_at is None}

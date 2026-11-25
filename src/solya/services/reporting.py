@@ -297,7 +297,12 @@ class Reporter:
             for ev in events:
                 if isinstance(ev, ClosedFault):
                     rec = ev.record
-                    text = he.fault_closed(name, _view(rec), local_now)
+                    if rec.source == "alert":  # SolarEdge itself closed the alert
+                        text = he.fault_closed(name, _view(rec), local_now)
+                    elif rec.serial:  # R24: our own detection cleared; never "SolarEdge closed"
+                        text = he.inverter_recovered(name, rec.serial, local_now)
+                    else:  # ZERO_PRODUCTION: no inverter to name, close silently
+                        continue
                     out.append((OutboundMessage(chat, "fault", text, None, f"closed:{site_id}:{rec.key}"),
                                 (rec.id, "closed_notified_at")))
             if comm is not None:

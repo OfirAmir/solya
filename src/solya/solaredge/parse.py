@@ -74,15 +74,22 @@ def parse_alerts(j: list, tz: str) -> list[Alert]:
     return out
 
 
+def is_fault_mode(mode: str | None) -> bool:
+    return bool(mode) and (mode == "FAULT" or mode.startswith("LOCKED"))
+
+
 def parse_inverter_status(j: dict, tz: str) -> dict[str, InverterState]:
     out = {}
     for serial, data in (j.get("inverters") or {}).items():
         values = ((data or {}).get("inverterMode") or {}).get("values") or []
         last = values[-1] if values else None
+        fault = next((v for v in values if is_fault_mode(v.get("value"))), None)
         out[serial] = InverterState(
             serial=serial,
             last_mode=last.get("value") if last else None,
             last_mode_at=_time(last.get("timestamp"), tz) if last else None,
+            fault_mode=fault.get("value") if fault else None,
+            fault_at=_time(fault.get("timestamp"), tz) if fault else None,
         )
     return out
 

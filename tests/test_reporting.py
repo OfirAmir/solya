@@ -731,3 +731,57 @@ async def test_restart_in_grace_report_waits_for_pulls(h, load_fixture, settings
     (report,) = h.sent("report")
     assert report.text == REGRESSION
     assert h.retries == []
+
+
+def home_status(*samples):
+    values = [{"timestamp": f"2026-11-24T{hhmm}:00+02:00", "value": v} for hhmm, v in samples]
+    return {"inverters": {"7F11A2B3-C4": {"inverterMode": {"values": values}}}}
+
+
+async def test_evening_pull_sees_daytime_inverter_fault(h, load_fixture):
+    """I4: a home site (evening pull only) with a midday LOCKED_GRID gets the alert,
+    although the last sample at dusk is no longer a fault mode."""
+    status = home_status(("09:00", "MPPT"), ("11:00", "LOCKED_GRID"), ("12:00", "MPPT"),
+                         ("16:00", "SLEEPING"))
+    with respx.mock:
+        mock_site(load_fixture, HOME, inverters=status)
+        await h.reporter.evening_pull(HOME)
+    (alert,) = h.sent("fault")
+    assert "LOCKED_GRID" in alert.text and "7F11A2B3-C4" in alert.text
+    assert alert.dedupe_key == f"fault:{HOME}:mode:7F11A2B3-C4"
+
+
+async def test_internal_fault_close_does_not_claim_solaredge_closed_it(h, load_fixture):
+    """I4/R24: a mode fault clearing gets the "back to normal" text, not the
+    "according to SolarEdge the alert closed" text."""
+    with respx.mock:
+        mock_site(load_fixture, HOME, inverters=home_status(("13:00", "LOCKED_GRID")))
+        await h.reporter.evening_pull(HOME)
+    with respx.mock:
+        mock_site(load_fixture, HOME, inverters=home_status(("13:00", "MPPT")))
+        await h.reporter.evening_pull(HOME)
+    (closed,) = [m for m in h.channel.sent if m.dedupe_key.startswith("closed:")]
+    assert closed.text == rtl_text(
+        "ערב טוב אורן,\n"
+        "לפי הנתונים מ־SolarEdge הממיר 7F11A2B3-C4 חזר לפעול כרגיל. "
+        "האם בוצע טיפול? מחכה לעדכון שלך."
+    )
+    assert "ההתראה" not in closed.text and "נסגרה" not in closed.text
+
+
+async def test_zero_production_closes_silently(h, load_fixture):
+    """I4/R24: a closed ZERO_PRODUCTION has no inverter to name, so no follow-up."""
+    zero = load_fixture("solaredge/overview_home_20261124.json")
+    zero["production"]["total"] = 0
+    with respx.mock:
+        mock_site(load_fixture, HOME, overview=zero)
+        await h.reporter.evening_pull(HOME)
+    assert [m.dedupe_key for m in h.sent("fault")] == [f"fault:{HOME}:zero:2026-11-24"]
+    h.clock.set(NOW + timedelta(days=1))
+    with respx.mock:
+        mock_site(load_fixture, HOME, site=site_body(load_fixture, HOME, "2026-11-25T16:40:00+02:00"))
+        await h.reporter.evening_pull(HOME)
+    with session_scope(h.db) as s:
+        (rec,) = s.scalars(select(FaultRecord)).all()
+        assert rec.closed_at is not None and rec.closed_notified_at is None
+    assert [m for m in h.channel.sent if m.dedupe_key.startswith("closed:")] == []

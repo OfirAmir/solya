@@ -122,6 +122,7 @@ def all_variants():
         he.fault_alert("אורן", None, fault("WEIRD"), AT_0700, AT_0700),
         he.fault_reminder("אורן", f, AT_0700),
         he.fault_closed("אורן", f, AT_0700),
+        he.inverter_recovered("אורן", "7E04E44D-B3", AT_0700),
         he.comm_loss_alert("אורן", "משק", since, AT_1710),
         he.comm_restored("אורן", "משק", AT_1710),
         he.connect_link("https://example.com/c?x=1"),
@@ -204,6 +205,17 @@ def test_reminder_and_closed_exact():
         "סגירה של ההתראה עדיין לא מעידה שהתקלה תוקנה. "
         "האם הטיפול בוצע? מחכה לעדכון שלך."
     )
+
+
+def test_inverter_recovered_copy_r24():
+    """R24: an internal (non-alert) fault closes without claiming SolarEdge closed it."""
+    out = he.inverter_recovered("אורן", "7E04E44D-B3", AT_0700)
+    assert out == (
+        "בוקר טוב אורן,\n"
+        f"לפי הנתונים מ־SolarEdge הממיר {RLM}7E04E44D-B3 חזר לפעול כרגיל. "
+        "האם בוצע טיפול? מחכה לעדכון שלך."
+    )
+    assert "ההתראה" not in out and "נסגרה" not in out
 
 
 def test_connect_link_url_line_untouched():

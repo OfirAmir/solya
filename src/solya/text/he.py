@@ -132,6 +132,16 @@ def fault_closed(name: str, f: FaultView, local_dt: datetime) -> str:
     )
 
 
+def inverter_recovered(name: str, serial: str, local_dt: datetime) -> str:
+    """R24: closure of an internally detected fault (inverter mode, not reporting).
+    Builder copy, flagged for Oren."""
+    return rtl_text(
+        f"{greeting(local_dt)} {name},\n"
+        f"לפי הנתונים מ־SolarEdge הממיר {serial} חזר לפעול כרגיל. "
+        "האם בוצע טיפול? מחכה לעדכון שלך."
+    )
+
+
 def comm_loss_alert(name: str, label: str, since_local: datetime, local_dt: datetime) -> str:
     return rtl_text(
         f"{greeting(local_dt)} {name},\n"

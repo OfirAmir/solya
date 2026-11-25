@@ -105,3 +105,23 @@ def test_parse_site_missing_timezone_uses_default(load_fixture):
     j["location"].pop("timezone")
     assert parse.parse_site(j).timezone == "Asia/Jerusalem"
     assert parse.parse_site(j, default_tz="Europe/Berlin").timezone == "Europe/Berlin"
+
+
+def test_parse_inverter_status_any_fault_sample():
+    """R24: a FAULT/LOCKED_* sample anywhere in the window counts, not only the last."""
+    j = {"inverters": {"S1": {"inverterMode": {"values": [
+        {"timestamp": "2026-11-24T08:00:00+02:00", "value": "MPPT"},
+        {"timestamp": "2026-11-24T11:00:00+02:00", "value": "LOCKED_GRID"},
+        {"timestamp": "2026-11-24T12:00:00+02:00", "value": "FAULT"},
+        {"timestamp": "2026-11-24T13:00:00+02:00", "value": "MPPT"},
+        {"timestamp": "2026-11-24T17:00:00+02:00", "value": "SLEEPING"},
+    ]}}}}
+    st = parse.parse_inverter_status(j, TZ)["S1"]
+    assert st.last_mode == "SLEEPING"
+    assert st.fault_mode == "LOCKED_GRID"
+    assert st.fault_at == datetime(2026, 11, 24, 9, 0, tzinfo=timezone.utc)
+
+
+def test_parse_inverter_status_no_fault_sample(load_fixture):
+    st = parse.parse_inverter_status(load_fixture("solaredge/inverters_status_ok.json"), TZ)
+    assert all(s.fault_mode is None and s.fault_at is None for s in st.values())

@@ -34,6 +34,14 @@ def test_detect_locked_mode():
     assert keys == {"mode:S1": "LOCKED_STAND_ALONE", "mode:S3": "FAULT"}
 
 
+def test_detect_daytime_fault_sample_after_dusk():
+    """R24: the evening pull sees a midday LOCKED_GRID even though the last sample is SLEEPING."""
+    at = NOW - timedelta(hours=5)
+    inv = {"S1": InverterState("S1", "SLEEPING", NOW, fault_mode="LOCKED_GRID", fault_at=at)}
+    out = detect_faults(bundle(inverters=inv), ["S1"], NOW, True, "evening")
+    assert out == [DetectedFault("mode:S1", "mode", "LOCKED_GRID", "S1", NOW)]
+
+
 def test_detect_missing_inverter_daylight_only():
     inv = {"S1": InverterState("S1", "MPPT", None)}
     day = detect_faults(bundle(inverters=inv), ["S1", "S2"], NOW, True, "midday")

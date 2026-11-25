@@ -43,6 +43,9 @@ class InverterState:
     serial: str
     last_mode: str | None
     last_mode_at: datetime | None
+    # The first FAULT/LOCKED_* sample in the status window, if any (R24).
+    fault_mode: str | None = None
+    fault_at: datetime | None = None
 
 
 @dataclass(frozen=True)
