@@ -205,3 +205,26 @@ def test_configure_logging_silences_http_loggers():
     finally:
         for n, lvl in saved.items():
             logging.getLogger(n).setLevel(lvl)
+
+
+def test_rejected_bot_token_not_printed(settings, clock, tmp_path, monkeypatch):
+    """M1: PTB's InvalidToken message carries the token; startup must fail without it."""
+    import traceback
+
+    from telegram.error import InvalidToken
+    from telegram.ext import Application
+
+    settings.database_url = f"sqlite:///{tmp_path}/solya.db"
+    secret = settings.telegram_bot_token.get_secret_value()
+
+    async def rejected(self):
+        raise InvalidToken(f"The token `{secret}` was rejected by the server.")
+
+    monkeypatch.setattr(Application, "initialize", rejected)
+    container = build_container(settings, clock=clock, channel=FakeChannel())
+    with pytest.raises(BaseException) as ei:
+        with TestClient(create_app(container, start_background=True)):
+            pass
+    shown = "".join(traceback.format_exception(ei.value))
+    assert secret not in shown and secret.split(":")[1] not in shown
+    assert "TELEGRAM_BOT_TOKEN" in shown

@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 from fastapi import FastAPI
 from sqlalchemy.engine import make_url
+from telegram.error import InvalidToken
 
 from solya.bot import build_bot_application
 from solya.clock import Clock, SystemClock
@@ -29,6 +30,10 @@ from solya.solaredge.client import SolarEdgeClient
 from solya.solaredge.oauth import TokenManager
 
 log = logging.getLogger(__name__)
+
+
+class StartupError(RuntimeError):
+    """The service cannot start; the message is safe to print."""
 
 
 @dataclass
@@ -107,7 +112,13 @@ def create_app(container: Container, start_background: bool = True) -> FastAPI:
         assert_raqm()
         bot_app = container.bot_app
         if start_background:
-            await bot_app.initialize()
+            try:
+                await bot_app.initialize()
+            except InvalidToken:
+                # PTB's message quotes the token; a crash loop would reprint it (M1).
+                raise StartupError(
+                    "Telegram rejected the bot token: check TELEGRAM_BOT_TOKEN in .env"
+                ) from None
             await bot_app.start()
             await bot_app.updater.start_polling()
             container.scheduler.start()
