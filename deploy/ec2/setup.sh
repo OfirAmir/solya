@@ -77,7 +77,8 @@ Usage: $0 [--branch NAME] [--ip A.B.C.D] [--repo URL] [--build] [--dry-run] [--a
 
   --branch NAME   git branch to deploy (default: $DEFAULT_BRANCH)
   --ip A.B.C.D    public IPv4 to build the sslip.io host from. Wins over the
-                  EC2 metadata lookup; needed when IMDSv2 is not reachable.
+                  EC2 metadata lookup; needed when IMDSv2 is not reachable
+                  (and on every run outside EC2, for example on Azure).
   --repo URL      git URL to clone (default: $DEFAULT_REPO)
   --build         build the image from the checked-out source and tag it as SOLYA_IMAGE,
                   instead of pulling it from GHCR (GHCR unreachable, or testing local changes)
@@ -337,6 +338,7 @@ imds_get() {  # path under /latest/ ; empty on failure
 PUBLIC_IP=""
 SSLIP_HOST=""
 BASE_URL=""
+SITE_URL=""   # the PUBLIC_BASE_URL in effect (.env's value when set), for the summary and health check
 
 resolve_ip() {
     if [[ -n "$IP_ARG" ]]; then
@@ -421,7 +423,7 @@ check_subnet() {
         done
         info "VPC ranges: $(tr '\n' ' ' <<< "$vpc")"
     elif (( SUBNET_EXPLICIT )); then
-        warn "could not read the VPC ranges from EC2 metadata; SOLYA_SUBNET=$NET_SUBNET was set explicitly, so the run continues without the VPC part of the overlap check"
+        warn "could not read the VPC ranges from EC2 metadata; SOLYA_SUBNET=$NET_SUBNET was set explicitly, so the run continues without the VPC part of the overlap check. Outside EC2 (for example on Azure) that is expected: make sure the range is not in the VNet's address space."
     else
         stop_check "could not read the VPC ranges from EC2 metadata (IMDS), so the default subnet $NET_SUBNET cannot be checked against them. Ask the host owner for a free range (VPC, peered VPCs, VPN, Transit Gateway) and pass it explicitly, for example: SOLYA_SUBNET=192.168.251.0/24 $0"
         unverified=1
@@ -802,9 +804,11 @@ prepare_env() {
     cur="$(env_get "$read_from" PUBLIC_BASE_URL)"
     fill_or_check PUBLIC_BASE_URL "$BASE_URL" "$read_from" "$EXAMPLE_BASE_URL"
     if (( MISMATCH )); then
-        warn "PUBLIC_BASE_URL in .env is '$cur', not '$BASE_URL'. Left unchanged (this script never overwrites a value). If the IP changed, edit it by hand and update the SolarEdge app's redirect URI to match."
+        warn "PUBLIC_BASE_URL in .env is '$cur', not '$BASE_URL'. Left unchanged (this script never overwrites a value). That is fine if it is your own DNS name for $PUBLIC_IP (for example an Azure FQDN). If the IP changed, edit it by hand and update the SolarEdge app's redirect URI to match."
     fi
     [[ "$cur" != */ ]] || warn "PUBLIC_BASE_URL ends with '/'. Remove the trailing slash: Caddy uses it as the site address."
+    SITE_URL="$BASE_URL"
+    if [[ -n "$cur" && "$cur" != "$EXAMPLE_BASE_URL" ]]; then SITE_URL="${cur%/}"; fi
 
     # Plain `docker compose` from $INSTALL_DIR then targets this kit's files and project.
     fill_or_check COMPOSE_FILE "$COMPOSE_FILE_VALUE" "$read_from"
@@ -884,7 +888,7 @@ build_and_check() {
 }
 
 wait_for_health() {
-    local url="$BASE_URL/healthz" _
+    local url="${SITE_URL:-$BASE_URL}/healthz" _
     log "Waiting for $url (the first certificate can take a minute)"
     for _ in $(seq 1 24); do
         if curl -fsS --max-time 5 "$url" >/dev/null 2>&1; then
@@ -911,13 +915,14 @@ start_stack() {
 }
 
 summary() {
-    local started="$1" missing k
+    local started="$1" missing k site="${SITE_URL:-$BASE_URL}" host
     missing="$(missing_secrets)"
+    host="${site#*://}"
     log "Summary"
-    info "Host:              $SSLIP_HOST"
-    info "PUBLIC_BASE_URL:   $BASE_URL"
-    info "OAuth redirect URI (register this in the SolarEdge app): $BASE_URL/oauth/callback"
-    info "Health check:      $BASE_URL/healthz"
+    info "Host:              $host"
+    info "PUBLIC_BASE_URL:   $site"
+    info "OAuth redirect URI (register this in the SolarEdge app): $site/oauth/callback"
+    info "Health check:      $site/healthz"
     info "Compose commands:  $INSTALL_DIR/deploy/ec2/compose <command>   (sudo docker compose for this kit)"
     if [[ -n "$missing" ]]; then
         printf '\n'
