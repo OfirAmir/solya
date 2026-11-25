@@ -519,6 +519,14 @@ async def test_on_site_connected_welcomes(h):
     assert h.channel.sent[-1].text == rtl_text("המערכת אורן סופר חוברה בהצלחה.")
 
 
+async def test_on_site_connected_replans_owner(h):
+    """R26: connecting a site re-plans today's jobs for its owner."""
+    replanned = []
+    h.reporter.replan_owner = replanned.append
+    await h.reporter.on_site_connected(FARM, is_first=False)
+    assert replanned == [1]
+
+
 async def test_default_delay_send_runs_later(h):
     ran = []
 

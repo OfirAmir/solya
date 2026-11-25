@@ -103,6 +103,21 @@ def test_callback_happy_path(env, load_fixture):
     assert any(rtl_text(he.WELCOME_1) in t for t in texts)
 
 
+@respx.mock
+def test_callback_schedules_todays_jobs(env, load_fixture):
+    """I7/R26: a site connected in the afternoon gets tonight's pull and report."""
+    tc, container, channel, token = env
+    _mock_se(load_fixture("solaredge/site_home.json"))
+    nonce = _nonce(container, token)
+    r = tc.get("/oauth/callback", params={"code": CODE, "site_id": SITE_ID,
+                                          "external_id": nonce, "state": nonce})
+    assert r.status_code == 200
+    with session_scope(container.session_factory) as s:
+        owner_id = s.get(Site, SITE_ID).owner_id
+    ids = {j.id for j in container.scheduler.scheduler.get_jobs()}
+    assert {f"evening_pull:{SITE_ID}:2026-11-24", f"evening_report:{owner_id}:2026-11-24"} <= ids
+
+
 def test_callback_error_param_400(env):
     tc, *_ = env
     r = tc.get("/oauth/callback", params={"error": "access_denied", "error_description": "no"})

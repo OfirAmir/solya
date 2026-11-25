@@ -184,6 +184,7 @@ class Reporter:
         ray: RayCalculator,
         schedule_retry: ScheduleRetry,
         delay_send: DelaySend | None = None,
+        replan_owner: Callable[[int], None] | None = None,
     ) -> None:
         self._sf = session_factory
         self._client = client
@@ -194,6 +195,8 @@ class Reporter:
         self._settings = settings
         self._ray = ray
         self.schedule_retry = schedule_retry
+        # R26: re-plans today's jobs for an owner (the running scheduler), if wired.
+        self.replan_owner = replan_owner
         self._delay_send = delay_send or self._default_delay_send
         self._retry_requested: set[tuple[int, date]] = set()
         self._background: set[asyncio.Task] = set()
@@ -477,6 +480,11 @@ class Reporter:
             row = s.get(Site, site_id)
             owner = s.get(Owner, row.owner_id)
             chat, owner_id, portal_name = str(owner.telegram_chat_id), owner.id, row.portal_name
+        if self.replan_owner is not None:
+            try:
+                self.replan_owner(owner_id)  # tonight's pull and report for the new site
+            except Exception:
+                log.exception("could not re-plan today's jobs for owner %s", owner_id)
         await self._send(
             OutboundMessage(chat, "welcome", he.site_connected(portal_name), None,
                             f"connected:{site_id}:{now.isoformat()}")
