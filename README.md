@@ -64,7 +64,37 @@ Do these steps in order.
    }
    ```
 
-   Caddy sets `X-Forwarded-For` itself. The service resolves the client IP from that header only when the connecting peer is in `TRUSTED_PROXIES`, and the admin login lockout and the sign-up rate limits count per client IP. With Caddy on the same host the default `["127.0.0.1"]` is right. If the proxy connects from another address (another container, a tunnel), list it, for example `TRUSTED_PROXIES=["172.18.0.1"]`; otherwise every visitor looks like the proxy and one attacker can lock everyone out. Never list an address that clients can reach directly.
+   Caddy sets `X-Forwarded-For` itself. The service resolves the client IP from that header only when the connecting peer is in `TRUSTED_PROXIES`, and the admin login lockout and the sign-up rate limits count per client IP.
+
+   **Under Docker Compose the default `["127.0.0.1"]` is wrong.** Caddy's connection to `localhost:8000` reaches the container through Docker's port proxy, so inside the container the peer is the compose network's gateway (for example `172.18.0.1`), not `127.0.0.1`. That peer is not trusted, `X-Forwarded-For` is ignored, and every visitor gets the gateway's address as their client IP. They then share one rate-limit bucket: five wrong admin passwords from anyone lock the real admin out for 15 minutes, and ten sign-up or `/join` posts an hour from anyone block every sign-up. Pick one of these setups:
+
+   - **Caddy on the host.** In `docker-compose.yml`, publish the port on loopback only, so clients cannot bypass Caddy and reach the service directly:
+
+     ```yaml
+         ports:
+           - "127.0.0.1:8000:8000"
+     ```
+
+     After `docker compose up -d`, find the network's gateway (the network is `<project>_default`, where the project is the folder name, for example `solya_default`):
+
+     ```bash
+     docker network inspect solya_default --format '{{(index .IPAM.Config 0).Gateway}}'
+     ```
+
+     Put that address in `.env`, for example `TRUSTED_PROXIES=["172.18.0.1"]`, then run `docker compose up -d` again. The gateway can change if the network is removed and recreated. To keep it fixed, pin the subnet at the top level of `docker-compose.yml` and trust that gateway (`TRUSTED_PROXIES=["172.30.0.1"]`):
+
+     ```yaml
+     networks:
+       default:
+         ipam:
+           config:
+             - subnet: 172.30.0.0/24
+               gateway: 172.30.0.1
+     ```
+
+   - **Caddy in the same compose file.** Add Caddy as a service on the same network with `reverse_proxy solya:8000`, give it a fixed address (pin the subnet as above and set `ipv4_address` under the Caddy service's `networks: default:`), list that address in `TRUSTED_PROXIES`, and remove the `ports:` entry from the `solya` service so only Caddy can reach it.
+
+   For any other proxy (a tunnel, another host), list the address it connects from. Never list an address that clients can reach directly: anyone connecting from it could set their own `X-Forwarded-For`.
 
    The web session cookie is `Secure` and bound to the host in `PUBLIC_BASE_URL`. Open the site only through that exact host: if the browser uses another host name (an alias, a bare IP, `www.`), the cookie is not sent and every journey page redirects back to `/`.
 9. **Create an invite and send it to Oren:**
@@ -198,7 +228,7 @@ These come from the API recon (section 8) and have not been checked against the 
 - Real payments: the pay page is a stub and charges nothing.
 - Free-form Q&A by default. Only the fixed questions are answered unless the optional AI answers below are switched on.
 - Weather inputs. They are only needed for RAY, which is disabled until its formula arrives.
-- Anything that lets a customer message change an account. Inbound messages can only request a connect link, register with an invite, and acknowledge a fault.
+- Anything that lets a customer message change an account. Inbound messages can only request a connect link, register with an invite, link a web sign-up's Telegram chat (the single-use link token from `/ready`), and acknowledge a fault. With AI answers on, a free-form message that matches no fixed question is also sent to the external AI provider (see "Optional AI answers"); the reply cannot change anything.
 
 ## Optional AI answers
 
