@@ -16,7 +16,9 @@ from telegram.ext import (
 
 from solya.db import session_scope
 from solya.services import ai_answers, answers, onboarding
-from solya.text.he import CHAT_BOUND_ELSEWHERE, HELP, INVITE_OK, NOT_INVITED, connect_link
+from solya.text.he import (
+    CHAT_BOUND_ELSEWHERE, HELP, INVITE_OK, LINKED_OK, NOT_INVITED, connect_link,
+)
 from solya.text.rtl import rtl_text
 
 log = logging.getLogger(__name__)
@@ -72,10 +74,26 @@ def build_bot_application(token: str, container) -> Application:
         if outcome == "bound_elsewhere":
             await reply(update, CHAT_BOUND_ELSEWHERE)
             return
-        await reply(update, INVITE_OK if owner is not None else NOT_INVITED)
         if linked_owner_id is not None:
-            await container.reporter.on_owner_linked(linked_owner_id)
-            container.scheduler.plan_owner(linked_owner_id)  # tonight's report (Q2)
+            await _after_link(update, linked_owner_id)
+            return
+        await reply(update, INVITE_OK if owner is not None else NOT_INVITED)
+
+    async def _after_link(update: Update, owner_id: int) -> None:
+        """The link is already committed. Plan tonight's report first (Q2), then reply,
+        then the welcome pair; one failing step never skips the others (final review M2)."""
+        try:
+            container.scheduler.plan_owner(owner_id)
+        except Exception:
+            log.exception("could not plan today's jobs for linked owner %s", owner_id)
+        try:
+            await reply(update, LINKED_OK)
+        except Exception:
+            log.exception("link reply to owner %s failed", owner_id)
+        try:
+            await container.reporter.on_owner_linked(owner_id)
+        except Exception:
+            log.exception("link-time messages for owner %s failed", owner_id)
 
     async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         now = container.clock.now()

@@ -225,6 +225,7 @@ async def test_start_link_token_links_and_welcomes(settings, clock, db, fake_cha
         o = s.get(Owner, oid)
         assert o.telegram_chat_id == 77 and o.link_token is None
         assert o.last_inbound_at is not None
+    msg.reply_text.assert_called_once_with(rtl_text(he.LINKED_OK))
     texts = [m.text for m in fake_channel.sent]
     assert rtl_text(he.WELCOME_1) in texts
     assert rtl_text(he.sites_monitored(2)) in texts
@@ -277,3 +278,40 @@ async def test_start_invite_still_works(settings, clock, db, fake_channel):
         assert s.query(Owner).filter_by(telegram_chat_id=9).count() == 1
     scheduler.plan_owner.assert_not_called()
     assert fake_channel.sent == []
+
+
+async def test_start_link_plans_before_replying(settings, clock, db, fake_channel):
+    """Tonight's report is planned first, so nothing after it can lose it (final review M2)."""
+    oid = _web_owner(db)
+    h, scheduler, _ = _linking(settings, clock, db, fake_channel)
+    upd, ctx, msg = _upd(chat=77, args=["linktok"])
+    order = []
+    scheduler.plan_owner.side_effect = lambda owner_id: order.append("plan")
+    msg.reply_text.side_effect = lambda text: order.append("reply")
+    await h["start"](upd, ctx)
+    assert order == ["plan", "reply"]
+    scheduler.plan_owner.assert_called_once_with(oid)
+
+
+async def test_start_link_reply_failure_still_welcomes_and_plans(settings, clock, db, fake_channel):
+    oid = _web_owner(db)
+    h, scheduler, delayed = _linking(settings, clock, db, fake_channel)
+    upd, ctx, msg = _upd(chat=77, args=["linktok"])
+    msg.reply_text.side_effect = RuntimeError("telegram down")
+    await h["start"](upd, ctx)
+    scheduler.plan_owner.assert_called_once_with(oid)
+    assert [m.dedupe_key for m in fake_channel.sent] == [f"welcome1:{oid}", f"monitored:{oid}"]
+    assert len(delayed) == 1
+
+
+async def test_start_link_plan_failure_still_replies_and_welcomes(settings, clock, db, fake_channel):
+    from solya.text import he
+    from solya.text.rtl import rtl_text
+
+    oid = _web_owner(db)
+    h, scheduler, _ = _linking(settings, clock, db, fake_channel)
+    upd, ctx, msg = _upd(chat=77, args=["linktok"])
+    scheduler.plan_owner.side_effect = RuntimeError("scheduler down")
+    await h["start"](upd, ctx)
+    msg.reply_text.assert_called_once_with(rtl_text(he.LINKED_OK))
+    assert [m.dedupe_key for m in fake_channel.sent] == [f"welcome1:{oid}", f"monitored:{oid}"]
