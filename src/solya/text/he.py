@@ -101,6 +101,9 @@ def daily_report(name: str, days: list[SiteDay], local_dt: datetime, show_total:
     # Exceptions first: every open fault (site order), then non-ok states (site order).
     for d in days:
         for f in d.open_faults:
+            if f.code == "WEAK_PRODUCTION":  # a suspicion, not an open alert to act on
+                lines.append(f"{d.label}: חשד לירידה בייצור, אני עוקבת.")
+                continue
             any_fault = True
             lines.append(
                 f"{d.label}: התראה פתוחה {f.code}{_in_serial(f.serial)}. "
@@ -185,7 +188,13 @@ def weak_recovered(name: str, label: str | None, local_dt: datetime) -> str:
     return rtl_text(f"{greeting(local_dt)} {name},\nהייצור{paren} חזר לרמה הצפויה. אמשיך לעקוב.")
 
 
-def fault_reminder(name: str, f: FaultView, local_dt: datetime) -> str:
+def fault_reminder(name: str, f: FaultView, local_dt: datetime, label: str | None = None) -> str:
+    if f.code == "WEAK_PRODUCTION":
+        paren = f" ({label})" if label else ""
+        return rtl_text(
+            f"{greeting(local_dt)} {name},\n"
+            f"תזכורת: עדיין קיים חשד לירידה בייצור{paren}. אני ממשיכה לעקוב ואעדכן אתכם."
+        )
     return rtl_text(
         f"{greeting(local_dt)} {name},\n"
         f"תזכורת, ההתראה {f.code}{_in_serial(f.serial)} עדיין פתוחה. {_ADVICE} {_FOLLOW_UP}"

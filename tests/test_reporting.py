@@ -818,6 +818,25 @@ async def test_open_mode_fault_not_closed_by_single_sample_window(h, load_fixtur
         assert rec.closed_at is None
 
 
+async def test_weak_reminder_uses_suspicion_copy(h):
+    """Review fix: the reminder of an open WEAK_PRODUCTION reads as a suspicion, with the
+    site label, no raw code and no service-call advice."""
+    now = h.clock.now()
+    with session_scope(h.db) as s:
+        s.add(FaultRecord(site_id=FARM, key=f"weak:{FARM}", source="weak", code="WEAK_PRODUCTION",
+                          first_seen=now - timedelta(hours=4), notified_at=now - timedelta(hours=4),
+                          detail='{"days": 3, "pct": 62}'))
+        label = reporting.effective_label(
+            s.get(Site, FARM), len(reporting._owner_sites(s, 1, monitored_only=True)))
+    await h.reporter.send_reminders()
+    (rem,) = [m for m in h.channel.sent if m.dedupe_key.startswith("reminder:")]
+    assert rem.text == rtl_text(
+        f"ערב טוב אורן,\nתזכורת: עדיין קיים חשד לירידה בייצור ({label}). "
+        "אני ממשיכה לעקוב ואעדכן אתכם."
+    )
+    assert "WEAK_PRODUCTION" not in rem.text and "קריאת שירות" not in rem.text
+
+
 async def test_fault_min_samples_setting(h, load_fixture):
     """FAULT_MIN_SAMPLES=1 restores the single-sample behaviour."""
     h.reporter._settings = h.reporter._settings.model_copy(update={"fault_min_samples": 1})

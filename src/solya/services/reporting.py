@@ -541,8 +541,10 @@ class Reporter:
                     if owner is not None and owner.telegram_chat_id is None:
                         _skip_unlinked(f"reminder for fault {rec.id}", owner.id)
                     continue
+                count = len(_owner_sites(s, owner.id, monitored_only=True))
                 text = he.fault_reminder(
-                    owner.display_name, _view(rec), now.astimezone(ZoneInfo(site.tz))
+                    owner.display_name, _view(rec), now.astimezone(ZoneInfo(site.tz)),
+                    label=effective_label(site, count),
                 )
                 msg = OutboundMessage(
                     chat, "fault", text, None,

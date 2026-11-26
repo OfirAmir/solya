@@ -404,3 +404,37 @@ def test_weak_copy_plural_and_no_direction_marks():
 def test_weak_alert_without_figures_still_reads():
     out = he.fault_alert("אורן", None, weak(None), AT_1710, AT_1710)
     assert "קיים חשד סביר לירידה בייצור: בימים האחרונים המערכת ייצרה פחות מהצפוי" in out
+
+
+def test_weak_production_reminder_copy():
+    """Review fix: the reminder keeps the suspicion wording, no raw code, no service call."""
+    assert he.fault_reminder("אורן", weak(), AT_1710) == (
+        "ערב טוב אורן,\n"
+        "תזכורת: עדיין קיים חשד לירידה בייצור. אני ממשיכה לעקוב ואעדכן אתכם."
+    )
+    assert he.fault_reminder("אורן", weak(), AT_1710, label="משק") == (
+        "ערב טוב אורן,\n"
+        "תזכורת: עדיין קיים חשד לירידה בייצור (משק). אני ממשיכה לעקוב ואעדכן אתכם."
+    )
+
+
+def test_weak_production_report_line():
+    """Review fix: an open weak-production suspicion is one calm line in the report."""
+    d = ok_day("משק", 316990, "142.65", open_faults=[weak()])
+    out = he.daily_report("אורן", [d], AT_1710, False)
+    lines = out.split("\n")
+    assert lines[1] == "משק: חשד לירידה בייצור, אני עוקבת."
+    assert lines[2] == f"משק: {RLM}317.0 קוט״ש, הכנסה {RLM}142.65 ₪"
+    assert lines[-1] == "לכל שאלה אני כאן. שיהיה ערב טוב."
+    for text in (out, he.fault_reminder("אורן", weak(), AT_1710, label="משק")):
+        assert "WEAK_PRODUCTION" not in text and "קריאת שירות" not in text
+        for form in SINGULAR_FORMS + ("אותך", "שלך"):
+            assert form not in text
+
+
+def test_weak_and_real_fault_in_report():
+    d = ok_day("משק", 1000, "1", open_faults=[weak(), fault()])
+    lines = he.daily_report("אורן", [d], AT_1710, False).split("\n")
+    assert lines[1] == "משק: חשד לירידה בייצור, אני עוקבת."
+    assert lines[2].startswith(f"משק: התראה פתוחה {RLM}FAN_ALERT_1")
+    assert lines[-1] == he._FOLLOW_UP
