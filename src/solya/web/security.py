@@ -15,6 +15,7 @@ SESSION_COOKIE = "solya_s"
 ADMIN_COOKIE = "solya_admin"
 SESSION_MAX_AGE = 30 * 24 * 3600
 ADMIN_MAX_AGE = 12 * 3600
+SETTINGS_SESSION_MAX_AGE = 24 * 3600  # a session opened from a bot /settings link
 
 
 def cookie_params(public_base_url: str, max_age: int) -> dict:
@@ -33,6 +34,7 @@ class Sessions:
     ) -> None:
         self._secret = secret
         clock = clock or SystemClock()
+        self._clock = clock
 
         class _Signer(TimestampSigner):
             def get_timestamp(self) -> int:
@@ -47,17 +49,33 @@ class Sessions:
             secret, salt=f"solya-admin:{pw}", signer=_Signer
         )
 
-    def issue(self, owner_id: int) -> str:
-        return self._serializer.dumps({"o": owner_id})
+    def issue(self, owner_id: int, max_age: int | None = None) -> str:
+        """With ``max_age`` (seconds) the cookie is read only for that long, not for
+        ``SESSION_MAX_AGE``."""
+        payload: dict = {"o": owner_id}
+        if max_age is not None:
+            payload["m"] = max_age
+        return self._serializer.dumps(payload)
 
     def read(self, cookie: str | None) -> int | None:
         if not cookie:
             return None
         try:
-            data = self._serializer.loads(cookie, max_age=SESSION_MAX_AGE)
+            data, signed_at = self._serializer.loads(
+                cookie, max_age=SESSION_MAX_AGE, return_timestamp=True
+            )
         except BadData:
             return None
-        owner_id = data.get("o") if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            return None
+        max_age = data.get("m")
+        if max_age is not None:
+            if not isinstance(max_age, int) or isinstance(max_age, bool):
+                return None
+            # same arithmetic as itsdangerous's own max_age check
+            if int(self._clock.now().timestamp()) - int(signed_at.timestamp()) > max_age:
+                return None
+        owner_id = data.get("o")
         return owner_id if isinstance(owner_id, int) else None
 
     def issue_admin(self) -> str:

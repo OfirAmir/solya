@@ -1,0 +1,19 @@
+{# Per-site settings fields (on /sites and /settings). Needs site: id, name, basis, tariff, errors. #}
+        <div class="site-fields grid">
+          <input type="hidden" name="present_{{ site.id }}" value="1">
+          <label>שם
+            <input type="text" name="name_{{ site.id }}" value="{{ site.name }}">
+          </label>
+          {% if site.errors.get("name") %}<p class="error" role="alert">{{ site.errors.name }}</p>{% endif %}
+          <fieldset class="choice">
+            <legend>איך מקבלים תשלום</legend>
+            <label class="inline"><input type="radio" name="basis_{{ site.id }}" value="production"{% if site.basis == "production" %} checked{% endif %}> על כל הייצור</label>
+            <label class="inline"><input type="radio" name="basis_{{ site.id }}" value="export"{% if site.basis == "export" %} checked{% endif %}> רק על מה שמוזרם לרשת</label>
+          </fieldset>
+          {% if site.errors.get("basis") %}<p class="error" role="alert">{{ site.errors.basis }}</p>{% endif %}
+          <label>תעריף לפני מע״מ (₪ לקוט״ש)
+            <input type="text" name="tariff_{{ site.id }}" value="{{ site.tariff }}" inputmode="decimal" dir="ltr">
+          </label>
+          <p class="note">לא יודע/ת? אפשר להשאיר ריק.</p>
+          {% if site.errors.get("tariff") %}<p class="error" role="alert">{{ site.errors.tariff }}</p>{% endif %}
+        </div>

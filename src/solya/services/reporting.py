@@ -35,7 +35,9 @@ from solya.rules.faults import (
 )
 from solya.rules.ray import RayCalculator, weighted_ray
 from solya.scheduler import is_daylight
+from solya.services.backfill import backfill_month
 from solya.services.onboarding import create_connect_request
+from solya.services.site_settings import display_name
 from solya.solaredge.client import SolarEdgeClient
 from solya.solaredge.errors import AuthExpired, BudgetExceeded
 from solya.solaredge.oauth import TokenManager
@@ -121,6 +123,7 @@ def _stored_day(
         state="ok",
         open_faults=open_fault_views(s, site.se_site_id),
         kwp=site.billing_kwp_override or site.peak_power_kwp_reported,
+        income_basis=site.income_basis,
     )
     if site.status == "reauth_needed":
         day.state = "reauth_needed"
@@ -143,7 +146,13 @@ def _stored_day(
 def _card_row(d: SiteDay) -> CardRow:
     if d.state != "ok":
         return CardRow(d.card_name, None, None, CARD_NOTES[d.state])
-    return CardRow(d.card_name, d.production_wh, d.income_ils, None)
+    n = len(d.open_faults)
+    if n:
+        status = ("fault", f"התראה פתוחה: {d.open_faults[0].code}" + (f" +{n - 1}" if n > 1 else ""))
+    else:
+        status = ("ok", "אין התראות פעילות")
+    label = ("הכנסה מהזרמה" if d.income_basis == "export" else "הכנסה") if d.income_ils is not None else None
+    return CardRow(d.card_name, d.production_wh, d.income_ils, None, label, status)
 
 
 def build_owner_report(
@@ -166,21 +175,30 @@ def build_owner_report(
         return None
     days = [_stored_day(session, site, len(sites), local_date, now) for site in shown]
     local_dt = now.astimezone(ZoneInfo(shown[0].tz))
+    # Spec section 1: a total for several sites with production; its ₪ only when every
+    # site has income (a partial ₪ sum next to the full kWh sum looks wrong)
     show_total = len(days) > 1 and all(
-        d.state == "ok" and d.production_wh is not None and d.income_ils is not None
-        for d in days
+        d.state == "ok" and d.production_wh is not None for d in days
     )
     total = None
     if show_total:
+        priced = all(d.income_ils is not None for d in days)
         total = (
             sum(d.production_wh for d in days),
-            sum((d.income_ils for d in days), Decimal("0")),
+            sum((d.income_ils for d in days), Decimal("0")) if priced else None,
         )
+    header = he.hebrew_date(local_date)
+    updates = [site.last_update_time for site in shown]
+    if all(u is not None for u in updates):
+        as_of = min(updates).astimezone(ZoneInfo(shown[0].tz))
+        header += f" · נכון ל־{as_of:%H:%M}"
     card = CardData(
         ray=weighted_ray([(d.ray, d.kwp) for d in days]),
         rows=[_card_row(d) for d in days],
         total=total,
-        date_label=f"{local_date:%d.%m.%Y}",
+        header=header,
+        site_count=len(days),
+        footnote="הכנסה משוערת לפני מע״מ" if any(d.income_ils is not None for d in days) else None,
     )
     return card, he.daily_report(owner.display_name, days, local_dt, show_total)
 
@@ -423,6 +441,17 @@ class Reporter:
             if built is None:
                 return
             card, text = built
+            hint_key = None
+            if any(
+                site.tariff_ils_per_kwh is None
+                and site.status == "active" and site.comm_state != "loss"
+                for site in _owner_sites(s, owner_id, monitored_only=True)
+            ):
+                year, week, _ = local_date.isocalendar()
+                key_ = f"tariff_hint:{owner_id}:{year}-W{week:02d}"
+                if s.get(OutboxEntry, key_) is None:
+                    hint_key = key_
+                    text += "\n" + he.TARIFF_HINT
 
         try:
             png = render_card(card)
@@ -432,7 +461,14 @@ class Reporter:
         key = f"report:{owner_id}:{local_date.isoformat()}"
         if retry:
             key += ":retry" + (f":{site_id}" if site_id is not None else "")
-        await self._send(OutboundMessage(chat, "report", text, png, key))
+        delivered = await self._send(OutboundMessage(chat, "report", text, png, key))
+        if delivered and hint_key is not None:
+            with session_scope(self._sf) as s:
+                if s.get(OutboxEntry, hint_key) is None:
+                    s.add(OutboxEntry(
+                        dedupe_key=hint_key, channel=self.channel.name, recipient=chat,
+                        kind="report", status="sent", attempts=1, sent_at=now,
+                    ))
 
     async def retry_pull_and_report(self, site_id: int, local_date: date) -> None:
         await self.evening_pull(site_id, local_date)
@@ -566,22 +602,26 @@ class Reporter:
     async def on_site_reassigned(self, site_id: int, old_owner: int, new_owner: int) -> None:
         """M4: tell the admins that a connect moved a site from one owner to another."""
         stamp = self._clock.now().isoformat()
-        for chat_id in self._settings.admin_chat_ids:
-            await self._send(
-                OutboundMessage(
-                    str(chat_id), "reply",
-                    f"האתר {site_id} הועבר מבעלים {old_owner} לבעלים {new_owner}", None,
-                    f"admin_reassign:{site_id}:{new_owner}:{stamp}:{chat_id}",
-                )
-            )
+        await self.notify_admins(
+            f"האתר {site_id} הועבר מבעלים {old_owner} לבעלים {new_owner}",
+            f"admin_reassign:{site_id}:{new_owner}:{stamp}",
+        )
 
-    async def on_site_connected(self, site: Site | int, is_first: bool) -> None:
+    async def notify_admins(self, text: str, key: str) -> None:
+        """Send ``text`` to each ADMIN_CHAT_IDS chat, deduped by ``{key}:{chat_id}``."""
+        for chat_id in self._settings.admin_chat_ids:
+            await self._send(OutboundMessage(str(chat_id), "reply", text, None,
+                                             f"{key}:{chat_id}"))
+
+    async def on_site_connected(self, site: Site | int, is_first: bool,
+                                already: bool = False) -> None:
+        """``already``: the owner re-approved a site they already had."""
         site_id = _site_id(site)
         now = self._clock.now()
         with session_scope(self._sf) as s:
             row = s.get(Site, site_id)
             owner = s.get(Owner, row.owner_id)
-            chat, owner_id, portal_name = owner_chat(owner), owner.id, row.portal_name
+            chat, owner_id, name = owner_chat(owner), owner.id, display_name(row)
             unlinked = owner.telegram_chat_id is None
         if self.replan_owner is not None:
             try:
@@ -595,7 +635,9 @@ class Reporter:
                 log.info("connect messages for site %s skipped: owner %s inactive", site_id, owner_id)
             return
         await self._send(
-            OutboundMessage(chat, "welcome", he.site_connected(portal_name), None,
+            OutboundMessage(chat, "welcome",
+                            he.site_already_connected(name) if already else he.site_connected(name),
+                            None,
                             f"connected:{site_id}:{now.isoformat()}")
         )
         if not is_first:
@@ -631,6 +673,25 @@ class Reporter:
                 chat, "welcome", he.sites_monitored(monitored), None, f"monitored:{owner_id}"))
         for msg in missed:
             await self._send(msg)
+
+    # -------------------------------------------------------------- backfill
+
+    def backfill_soon(self, site_id: int) -> None:
+        """Run the month-to-date backfill for ``site_id`` in the background. Never raises
+        into the caller; failures are logged by exception type only."""
+        async def run() -> None:
+            try:
+                await backfill_month(self._client, self._sf, site_id, self._clock.now())
+            except Exception as e:
+                log.warning("backfill for site %s failed: %s", site_id, type(e).__name__)
+
+        try:
+            task = asyncio.get_running_loop().create_task(run())
+        except Exception as e:
+            log.warning("backfill for site %s not scheduled: %s", site_id, type(e).__name__)
+            return
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
 
     # -------------------------------------------------------------- delivery
 

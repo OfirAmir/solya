@@ -5,21 +5,25 @@
       <h1>עדיין אין מערכת מחוברת.</h1>
       <p><a class="button" href="/connect-site">חזרה לחיבור</a></p>
     {% else %}
+      {% with done_form = (none if linked else "picker") %}{% include "_banner.html" %}{% endwith %}
       <h1>אילו מערכות לעקוב?</h1>
       {% if linked %}<p class="warn" role="status">{{ via_bot }}</p>{% endif %}
       {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
-      <form class="grid" action="/sites" method="post">
+      <form class="grid" id="picker" action="/sites" method="post">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         {% for site in sites %}
+        <div class="site-block">
         <label class="site">
           <input type="checkbox" name="site" value="{{ site.id }}"{% if site.monitored %} checked{% endif %}{% if linked %} disabled{% endif %}>
           <span>
-            <strong>{{ site.name }}</strong>
+            <strong>{{ site.title }}</strong>
             <span class="note">מזהה <bdi>{{ site.id }}</bdi></span>
             {% if site.portal_kw is not none %}<span class="note">הספק בפורטל <bdi>{{ site.portal_kw }}</bdi> קילוואט, משמש להערכה בלבד</span>{% endif %}
             <span class="price">{{ site.price }}</span>
           </span>
         </label>
+        {% if not linked %}{% include "_site_fields.html" %}{% endif %}
+        </div>
         {% endfor %}
         {% if not linked %}
         <div class="row">

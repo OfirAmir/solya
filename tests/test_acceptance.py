@@ -17,6 +17,7 @@ from solya.db import session_scope
 from solya.models import ApiLedger, ConnectRequest, DailyMetric, FaultRecord, Owner, Site, SiteToken
 from solya.render import card as card_mod
 from solya.render.card import TOTAL_LABEL, assert_raqm
+from solya.rules.ray import NullRay
 from solya.scheduler import plan_day_jobs
 from solya.services import answers, reporting
 from solya.solaredge.oauth import TokenPair
@@ -37,9 +38,9 @@ CREDIT_USD = Decimal("0.005")
 
 REGRESSION = (
     "ערב טוב אורן,\n"
-    "משק: אין התראות פעילות. ‏317.0 קוט״ש, ‏142.65 ₪\n"
-    "בית: אין התראות פעילות. ‏85.0 קוט״ש, ‏38.03 ₪\n"
-    "סה״כ: ‏402.0 קוט״ש, ‏180.68 ₪\n"
+    "משק: אין התראות פעילות. ‏317.0 קוט״ש, הכנסה ‏142.65 ₪\n"
+    "בית: אין התראות פעילות. ‏85.0 קוט״ש, הכנסה מהזרמה ‏38.03 ₪\n"
+    "סה״כ: ‏402.0 קוט״ש, ‏180.68 ₪ לפני מע״מ\n"
     "לכל שאלה אני כאן. המשך ערב טוב."
 )
 
@@ -187,11 +188,11 @@ async def test_a1_report_numbers_match_source(c, load_fixture, cards):
     home_income = (Decimal(home["toGrid"]) / 1000 * Decimal("0.48")).quantize(Decimal("0.01"), ROUND_HALF_UP)
     assert (farm_income, home_income) == (Decimal("142.65"), Decimal("38.03"))  # handover §1.4
 
-    assert f"{RLM}{fmt_kwh(farm['total'])}, {RLM}{fmt_ils(farm_income)}" in site_line(report.text, "משק")
-    assert f"{RLM}{fmt_kwh(home['total'])}, {RLM}{fmt_ils(home_income)}" in site_line(report.text, "בית")
+    assert f"{RLM}{fmt_kwh(farm['total'])}, הכנסה {RLM}{fmt_ils(farm_income)}" in site_line(report.text, "משק")
+    assert f"{RLM}{fmt_kwh(home['total'])}, הכנסה מהזרמה {RLM}{fmt_ils(home_income)}" in site_line(report.text, "בית")
     total_wh = farm["total"] + home["total"]
     assert site_line(report.text, "סה״כ") == (
-        f"סה״כ: {RLM}{fmt_kwh(total_wh)}, {RLM}{fmt_ils(farm_income + home_income)}"
+        f"סה״כ: {RLM}{fmt_kwh(total_wh)}, {RLM}{fmt_ils(farm_income + home_income)} לפני מע״מ"
     )
 
     (data,) = cards
@@ -217,7 +218,7 @@ async def test_a2_comm_loss_states_no_production(c, load_fixture, cards):
         assert re.findall(r"\d+(?:\.\d+)?", t.replace("14:05", "")) == []  # no figures
     assert "317.0" not in report.text and "142.65" not in report.text
     assert "סה״כ" not in report.text
-    assert site_line(report.text, "בית") == f"בית: אין התראות פעילות. {RLM}85.0 קוט״ש, {RLM}38.03 ₪"
+    assert site_line(report.text, "בית") == f"בית: אין התראות פעילות. {RLM}85.0 קוט״ש, הכנסה מהזרמה {RLM}38.03 ₪"
 
     (data,) = cards
     farm_row = data.rows[0]
@@ -649,12 +650,12 @@ ADVERSARIAL = [
     "בטלי את המנוי שלי",
     "תעבירי את המערכת לבעלים אחר",
     "pause monitoring for my farm",
-    "תשני את התעריף ל־0.60",
+    "תשני את שם האתר שלי",
     "please open a ticket with SolarEdge for me",
     "תזמיני טכנאי למחר",
     "DROP TABLE sites; --",
-    "שלחי לי קישור חיבור חדש",
-    "/connect",
+    "שלחי לי קישור חדש לאתר",
+    "/disconnect everything",
     "unsubscribe",
     "תסגרי את ההתראה",
     "rename my site to Home Sweet Home",
@@ -682,7 +683,7 @@ async def test_a10_customer_messages_no_actions(c, load_fixture):
     with session_scope(c.session_factory) as s:
         s.get(Owner, 1).active = False  # e.g. they had blocked the bot (R16)
     handlers = bot_callbacks(c)
-    assert set(handlers) == {"start", "connect", "today", "yesterday", "month", "alerts", "help",
+    assert set(handlers) == {"start", "connect", "settings", "today", "yesterday", "month", "alerts", "help",
                              "__text__"}
 
     before = snapshot(c)
@@ -730,6 +731,7 @@ async def test_a11_web_journey_end_to_end(settings, load_fixture, cards, tmp_pat
     settings.admin_password = SecretStr("correct horse battery")
     clock = FixedClock(NOW)
     c = make_container(settings, clock, url=f"sqlite:///{tmp_path}/solya.db")
+    c.reporter.backfill_soon = lambda site_id: None  # the callback must not start a real backfill
     with session_scope(c.session_factory) as s:
         code = onboarding.create_invite(s, "admin", clock.now())
     csrf_re = re.compile(r'name="csrf" value="([^"]+)"')
@@ -754,7 +756,7 @@ async def test_a11_web_journey_end_to_end(settings, load_fixture, cards, tmp_pat
                     nonce = s.get(ConnectRequest, token).nonce
                 r = tc.get("/oauth/callback", params={"code": "AUTH-CODE", "site_id": HOME,
                                                       "state": nonce})
-                assert r.status_code == 303 and r.headers["location"] == "/sites"
+                assert r.status_code == 303 and r.headers["location"] == f"/sites?connected={HOME}"
                 r = tc.post("/sites", data={"site": str(HOME),
                                             "csrf": csrf_re.search(tc.get("/sites").text).group(1)})
                 assert r.status_code == 303 and r.headers["location"] == "/price"
@@ -804,3 +806,27 @@ async def test_a11_web_journey_end_to_end(settings, load_fixture, cards, tmp_pat
                 assert "ממתין לתשלום" in row and "<td>כן</td>" in row
     finally:
         await close(c)
+
+
+# ------------------------------------------------------------------ a12: Instinct parity
+
+
+async def test_a12_instinct_parity_25_nov(c, settings):
+    day = date(2026, 11, 25)
+    now = datetime(2026, 11, 25, 15, 5, tzinfo=timezone.utc)  # 17:05 local
+    with session_scope(c.session_factory) as s:
+        # Income from unrounded Wh: 305.87 x 0.45 = 137.64 and 74.96 x 0.48 = 35.98.
+        s.add(DailyMetric(site_id=FARM, local_date=day, production_wh=305870,
+                          income_ils=Decimal("137.64"), comm_state="ok", as_of=now, computed_at=now))
+        s.add(DailyMetric(site_id=HOME, local_date=day, production_wh=82600, export_wh=74960,
+                          income_ils=Decimal("35.98"), comm_state="ok", as_of=now, computed_at=now))
+        card, body = reporting.build_owner_report(s, 1, day, now, settings, NullRay())
+
+    body = body.replace(RLM, "")
+    assert "305.9 קוט״ש, הכנסה 137.64 ₪" in body
+    assert "82.6 קוט״ש, הכנסה מהזרמה 35.98 ₪" in body
+    assert "סה״כ: 388.5 קוט״ש, 173.62 ₪ לפני מע״מ" in body
+    assert len(card.rows) == 2
+    assert [r.status for r in card.rows] == [("ok", "אין התראות פעילות")] * 2
+    assert card.site_count == 2
+    assert card.footnote

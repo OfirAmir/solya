@@ -111,6 +111,18 @@ class ConnectRequest(Base):
     site_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
 
+class SettingsLink(Base):
+    """A single-use link from the bot's /settings to the web settings page. Only the
+    SHA-256 hex of the token is stored."""
+
+    __tablename__ = "settings_links"
+
+    token_hash: Mapped[str] = mapped_column(String, primary_key=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("owners.id"))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    used_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+
+
 class RawResponse(Base):
     __tablename__ = "raw_responses"
 

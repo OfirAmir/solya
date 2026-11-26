@@ -1,7 +1,8 @@
 """Pure parsers for SolarEdge V2 responses."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 from solya.solaredge.models import (
     Alert,
@@ -111,3 +112,38 @@ def parse_lifetime(j: dict, tz: str) -> LifetimeEnergy:
         energy_wh=to_wh(j.get("energy"), j.get("unit") or "WH"),
         last_update_time=_time(j.get("lastUpdateTime"), tz),
     )
+
+
+def _daily_values(values: list | None, unit: str | None, tz: str) -> dict[date, float]:
+    """DAY-resolution values keyed by site-local date (timestamps mark the day start)."""
+    zone = ZoneInfo(tz)
+    out: dict[date, float] = {}
+    for v in values or []:
+        wh = to_wh(v.get("value"), unit)
+        ts = v.get("timestamp")
+        if wh is None or not ts:
+            continue
+        day = parse_se_time(ts, tz).astimezone(zone).date()
+        out[day] = out.get(day, 0.0) + wh
+    return out
+
+
+def parse_energy_daily(j: dict, tz: str) -> dict[date, float]:
+    """``GET /sites/{id}/energy?resolution=DAY`` to Wh per site-local date; nulls skipped."""
+    return _daily_values(j.get("values"), j.get("unit"), tz)
+
+
+def parse_meter_export_daily(j: dict, tz: str) -> dict[date, float] | None:
+    """``exportEnergy`` summed across meters per site-local date, or None when no meter
+    reports ``exportEnergy``."""
+    meters = j.get("meters") or {}
+    out: dict[date, float] | None = None
+    for meter in meters.values():
+        block = (meter or {}).get("exportEnergy")
+        if not isinstance(block, dict):
+            continue
+        if out is None:
+            out = {}
+        for day, wh in _daily_values(block.get("values"), block.get("unit"), tz).items():
+            out[day] = out.get(day, 0.0) + wh
+    return out

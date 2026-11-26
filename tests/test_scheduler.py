@@ -137,6 +137,9 @@ class FakeReporter:
     async def keepalive(self):
         self.calls.append(("keepalive",))
 
+    def backfill_soon(self, site_id):
+        self.calls.append(("backfill_soon", site_id))
+
 
 async def test_scheduler_service_start_smoke(db, settings):
     # A future local day so no planned job can fire while the test runs.
@@ -152,7 +155,7 @@ async def test_scheduler_service_start_smoke(db, settings):
     try:
         jobs = {j.id: j for j in svc.scheduler.get_jobs()}
         d = day.isoformat()
-        assert {"plan", "send_reminders", "keepalive",
+        assert {"plan", "send_reminders", "keepalive", "startup_backfill",
                 f"evening_pull:1:{d}", f"evening_report:1:{d}", f"midday_check:1:{d}:12:30"} <= set(jobs)
         assert not any(":2:" in k for k in jobs)
         assert all(j.misfire_grace_time == 3600 and j.coalesce for j in jobs.values())
@@ -228,3 +231,32 @@ async def test_plan_drops_day_once_report_is_beyond_grace(db, settings):
     svc = SchedulerService(FakeReporter(), db, settings, clock)
     svc.plan_today()
     assert svc.scheduler.get_jobs() == []
+
+
+async def test_startup_job_one_minute_after_start(db, settings):
+    day = datetime.now(timezone.utc).astimezone(ZoneInfo(TZ)).date() + timedelta(days=2)
+    clock = FixedClock(datetime.combine(day, time(0, 10), ZoneInfo(TZ)))
+    svc = SchedulerService(FakeReporter(), db, settings, clock)
+    svc.start()
+    try:
+        job = svc.scheduler.get_job("startup_backfill")
+        assert job.next_run_time == clock.now() + timedelta(minutes=1)
+        assert job.args == ("startup_backfill",)
+    finally:
+        svc.shutdown()
+
+
+async def test_startup_backfill_active_monitored_and_name_defaults(db, settings):
+    with session_scope(db) as s:
+        s.add(Owner(id=1, display_name="o", telegram_chat_id=1, created_at=NOW))
+        s.add(make_site(1, portal_name="אורן סופר - משק"))
+        s.add(make_site(2, status="paused"))
+        s.add(make_site(3, monitored=False))
+        s.add(make_site(4, status="reauth_needed", card_name="x"))
+    reporter = FakeReporter()
+    svc = SchedulerService(reporter, db, settings, FixedClock(NOW))
+    await svc._run("startup_backfill")
+    assert reporter.calls == [("backfill_soon", 1)]
+    with session_scope(db) as s:
+        assert s.get(Site, 1).card_name
+        assert s.get(Site, 4).card_name == "x"

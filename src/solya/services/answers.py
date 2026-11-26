@@ -19,9 +19,20 @@ from solya.text.rtl import rtl_text
 NO_ALERTS = "אין התראות פעילות."
 DEFAULT_TZ = "Asia/Jerusalem"
 
-Route = Literal["today", "yesterday", "month", "alerts", "help"]
+Route = Literal["connect", "settings", "today", "yesterday", "month", "alerts", "help"]
+
+_MARKS = re.compile("[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
+
+
+def strip_marks(text: str) -> str:
+    """Drop invisible direction marks (copied from Hebrew messages), then trim."""
+    return _MARKS.sub("", text).strip()
+
 
 _ROUTES: list[tuple[re.Pattern[str], Route]] = [
+    # "ה" may precede each word: "המערכת השנייה"
+    (re.compile("לחבר|תחבר|חיבור|מערכת נוספת|עוד מערכת|ה?מערכת ה?שני(?:ה|יה)"), "connect"),
+    (re.compile("הגדרות|תעריף"), "settings"),
     (re.compile("אתמול"), "yesterday"),
     (re.compile("התראות|התראה|תקלה"), "alerts"),
     (re.compile("החודש|חודש"), "month"),

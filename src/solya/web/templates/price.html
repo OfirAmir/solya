@@ -2,7 +2,10 @@
 {% block content %}
     <section class="card">
       <h1>המחיר החודשי</h1>
-      <p class="note">מערכות במעקב: {{ names | join(", ") }}</p>
+      <p class="note">מערכות במעקב:</p>
+      <ul class="prices">
+        {% for row in rows %}<li><strong><bdi>{{ row.name }}</bdi></strong>: <span class="price">{{ row.price }}</span></li>{% endfor %}
+      </ul>
       <p class="total">{{ total }}</p>
       <form class="row" action="/pay" method="post">
         <input type="hidden" name="csrf" value="{{ csrf }}">

@@ -71,7 +71,7 @@ ssh -t azureuser@<fqdn> nano /opt/solya/.env
 - `SOLAREDGE_CLIENT_ID`
 - `SOLAREDGE_CLIENT_SECRET`. Copy the existing secret; do not regenerate it.
 
-The SolarEdge app's redirect URI must be exactly `https://<fqdn>/oauth/callback`.
+The SolarEdge app's redirect URI must be exactly `https://<fqdn>/oauth/callback`, and it must be the app's **default** redirect URI. SolarEdge ignores the other entries and sends the owner to the default one (observed live on 26 Nov: owners landed on an old URL).
 
 **Recommended:**
 

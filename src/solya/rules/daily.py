@@ -43,6 +43,7 @@ class SiteDay:
     open_faults: list[FaultView] = field(default_factory=list)
     ray: float | None = None
     kwp: float | None = None
+    income_basis: str = "production"
 
 
 def income(
@@ -63,7 +64,7 @@ def effective_label(site: Site, owner_site_count: int) -> str:
         return site.label_he
     if owner_site_count <= 1:
         return SINGLE_SITE_LABEL
-    return site.portal_name
+    return site.card_name or site.portal_name
 
 
 def compute_site_day(
@@ -85,6 +86,7 @@ def compute_site_day(
         state="ok",
         open_faults=list(open_faults),
         kwp=site.billing_kwp_override or site.peak_power_kwp_reported,
+        income_basis=site.income_basis,
     )
     if site.status == "reauth_needed":
         day.state = "reauth_needed"

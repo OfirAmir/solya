@@ -1,0 +1,16 @@
+{# The after-connect banner (on /sites and /settings). Needs banner, csrf, done_form. #}
+{% if banner %}
+      <div class="banner" role="status">
+      {% if banner.kind == "already" %}
+        <p><strong>המערכת <bdi>{{ banner.name }}</bdi> כבר מחוברת. בחלון של SolarEdge בחרו מערכת אחרת.</strong></p>
+      {% else %}
+        <p><strong>המערכת <bdi>{{ banner.name }}</bdi> חוברה. יש לך עוד מערכת?</strong></p>
+      {% endif %}
+        <form class="row" action="/connect-site" method="post">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button type="submit">חיבור מערכת נוספת</button>
+          {% if done_form %}<button type="submit" class="button secondary" form="{{ done_form }}">סיימתי, המשך</button>{% endif %}
+        </form>
+        <p class="note">בחלון של SolarEdge בחרו את המערכת שעוד לא חוברה.</p>
+      </div>
+{% endif %}

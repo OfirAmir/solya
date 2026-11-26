@@ -220,3 +220,77 @@ async def test_site_body_allowlisted_before_store(make_client, db, load_fixture)
     dumped = str(body)
     for key in ("email", "accountId", "address", "city"):
         assert key not in dumped
+
+
+async def test_get_energy_daily_parses(make_client):
+    body = {
+        "period": {"from": "2026-10-31T22:00:00Z", "to": "2026-11-03T22:00:00Z"},
+        "resolution": "DAY",
+        "unit": "KWH",
+        "values": [
+            {"timestamp": "2026-11-01T00:00:00+02:00", "value": 12.5},
+            {"timestamp": "2026-11-02T00:00:00+02:00", "value": None},
+            {"timestamp": "2026-11-02T22:00:00Z", "value": 3.25},
+        ],
+    }
+    with respx.mock:
+        route = respx.get(f"{BASE}/sites/{SITE}/energy").mock(
+            return_value=httpx.Response(200, json=body)
+        )
+        out = await make_client.get_energy_daily(
+            SITE, date(2026, 11, 1), date(2026, 11, 3), "Asia/Jerusalem"
+        )
+    q = route.calls[0].request.url.params
+    assert q["from"] == "2026-10-31T22:00:00Z"
+    assert q["to"] == "2026-11-03T22:00:00Z"
+    assert q["resolution"] == "DAY"
+    assert out == {date(2026, 11, 1): 12500.0, date(2026, 11, 3): 3250.0}
+
+    body["unit"] = "WH"
+    with respx.mock:
+        respx.get(f"{BASE}/sites/{SITE}/energy").mock(return_value=httpx.Response(200, json=body))
+        out = await make_client.get_energy_daily(
+            SITE, date(2026, 11, 1), date(2026, 11, 3), "Asia/Jerusalem"
+        )
+    assert out == {date(2026, 11, 1): 12.5, date(2026, 11, 3): 3.25}
+
+
+async def test_get_meter_export_daily_sums_meters(make_client):
+    body = {
+        "meters": {
+            "M1": {"exportEnergy": {"unit": "KWH", "values": [
+                {"timestamp": "2026-11-01T00:00:00+02:00", "value": 1.0},
+                {"timestamp": "2026-11-02T00:00:00+02:00", "value": None}]},
+                   "productionEnergy": {"unit": "WH", "values": []}},
+            "M2": {"exportEnergy": {"unit": "WH", "values": [
+                {"timestamp": "2026-11-01T00:00:00+02:00", "value": 500}]}},
+            "M3": {"importEnergy": {"unit": "WH", "values": []}},
+        },
+        "resolution": "DAY",
+    }
+    with respx.mock:
+        route = respx.get(f"{BASE}/sites/{SITE}/meters/telemetry").mock(
+            return_value=httpx.Response(200, json=body)
+        )
+        out = await make_client.get_meter_export_daily(
+            SITE, date(2026, 11, 1), date(2026, 11, 2), "Asia/Jerusalem"
+        )
+    assert route.calls[0].request.url.params["resolution"] == "DAY"
+    assert out == {date(2026, 11, 1): 1500.0}
+
+
+async def test_get_meter_export_daily_no_meter(make_client):
+    with respx.mock:
+        respx.get(f"{BASE}/sites/{SITE}/meters/telemetry").mock(return_value=httpx.Response(404))
+        out = await make_client.get_meter_export_daily(
+            SITE, date(2026, 11, 1), date(2026, 11, 2), "Asia/Jerusalem"
+        )
+    assert out is None
+    body = {"meters": {"M3": {"importEnergy": {"unit": "WH", "values": []}}}}
+    with respx.mock:
+        respx.get(f"{BASE}/sites/{SITE}/meters/telemetry").mock(
+            return_value=httpx.Response(200, json=body))
+        out = await make_client.get_meter_export_daily(
+            SITE, date(2026, 11, 1), date(2026, 11, 2), "Asia/Jerusalem"
+        )
+    assert out is None

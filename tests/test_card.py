@@ -18,7 +18,6 @@ def _data(ray=None, rows=None, total=True):
         ray=ray,
         rows=rows,
         total=(402029.0, Decimal("180.68")) if total else None,
-        date_label="24.11.2026",
     )
 
 
@@ -68,3 +67,28 @@ def test_height_grows_with_rows():
     one = _open(_data(rows=[_row()]))
     three = _open(_data(rows=[_row(), _row("IL 360"), _row("אחר")]))
     assert three.height > one.height
+
+
+def test_card_renders_status_labels_header_footnote():
+    rows = [
+        CardRow("אורן סופר", 316990.0, Decimal("142.65"), None,
+                income_label="הכנסה", status=("ok", "אין התראות פעילות")),
+        CardRow("IL 360", 85039.0, Decimal("38.03"), None,
+                income_label="הכנסה מהזרמה", status=("fault", "התראה פתוחה: FAN_ALERT_1")),
+    ]
+    plain = CardData(ray=None, rows=rows, total=None)
+    full = CardData(
+        ray=None, rows=rows, total=None, header="רביעי, 25 בנובמבר · נכון ל־17:01",
+        site_count=2, footnote="הכנסה משוערת לפני מע״מ",
+    )
+    png = render_card(full)
+    assert png.startswith(b"\x89PNG")
+    assert _open(full).height > _open(plain).height
+
+
+def test_render_total_kwh_only():
+    """Final fix 4: a mixed-tariff total row has kWh and no ₪."""
+    rows = [_row(), CardRow("IL 360", 85039.0, None, None)]
+    im = Image.open(BytesIO(render_card(CardData(ray=None, rows=rows,
+                                                 total=(402029.0, None)))))
+    assert im.format == "PNG" and im.width == 1080

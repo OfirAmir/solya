@@ -32,8 +32,10 @@ from solya.solaredge.oauth import TokenManager
 from solya.solaredge.parse import (
     parse_alerts,
     parse_devices,
+    parse_energy_daily,
     parse_inverter_status,
     parse_lifetime,
+    parse_meter_export_daily,
     parse_overview,
     parse_site,
 )
@@ -253,3 +255,35 @@ class SolarEdgeClient:
     ) -> LifetimeEnergy:
         j = await self._get(site_id, f"/sites/{site_id}/lifetime-energy", priority=priority)
         return parse_lifetime(j, tz)
+
+    @staticmethod
+    def _days_params(start: date, end: date, tz: str) -> Params:
+        """Site-local start of ``start`` to end of ``end``, at DAY resolution."""
+        return [
+            ("from", day_window_utc(start, tz)[0]),
+            ("to", day_window_utc(end, tz)[1]),
+            ("resolution", "DAY"),
+        ]
+
+    async def get_energy_daily(
+        self, site_id: int, start: date, end: date, tz: str, *, priority: Priority = "optional"
+    ) -> dict[date, float]:
+        j = await self._get(
+            site_id, f"/sites/{site_id}/energy", self._days_params(start, end, tz), priority
+        )
+        return parse_energy_daily(j, tz)
+
+    async def get_meter_export_daily(
+        self, site_id: int, start: date, end: date, tz: str, *, priority: Priority = "optional"
+    ) -> dict[date, float] | None:
+        """Grid export per site-local date, or None when the site has no meter."""
+        try:
+            j = await self._get(
+                site_id,
+                f"/sites/{site_id}/meters/telemetry",
+                self._days_params(start, end, tz),
+                priority,
+            )
+        except NotFound:
+            return None
+        return parse_meter_export_daily(j, tz)

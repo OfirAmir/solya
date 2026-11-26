@@ -8,8 +8,10 @@ session (or whose owner is no longer active) redirect with 303 to /."""
 from __future__ import annotations
 
 import secrets
+from decimal import Decimal
 from pathlib import Path
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 import jinja2
 from fastapi import APIRouter, Form, Request
@@ -22,7 +24,7 @@ from solya.models import Invite, Owner, Payment, Site
 from solya.pricing import (
     ESTIMATE_LABEL, UNKNOWN_PRICE, VAT_NOTE, describe_price, price_site, price_total,
 )
-from solya.services import onboarding, payments
+from solya.services import onboarding, payments, site_settings
 from solya.web.security import (
     SESSION_COOKIE, SESSION_MAX_AGE, RateLimiter, client_ip, cookie_params,
 )
@@ -50,7 +52,7 @@ ALREADY_LINKED = "כבר נרשמת, המשך בטלגרם"
 FORM_EXPIRED = "תוקף הטופס פג. נא לנסות שוב."
 TOO_MANY = "יותר מדי ניסיונות. נא לנסות שוב בעוד שעה."
 PICK_ONE = "יש לבחור לפחות מערכת אחת"
-CHANGES_VIA_BOT = "השינויים נעשים עכשיו דרך סול בטלגרם"
+CHANGES_VIA_BOT = "לשינויים שלחו לסול בטלגרם /settings"
 NOT_FOUND = "העמוד לא נמצא."
 PAYMENT_DESCRIPTION = "מנוי חודשי, ספק טרם נבחר"
 
@@ -255,11 +257,14 @@ async def connect_site(request: Request):
     owner_id, csrf = sess
     c = _container(request)
     with session_scope(c.session_factory) as s:
-        first_name = (s.get(Owner, owner_id).display_name.split() or [""])[0]
-        has_sites = bool(_owner_sites(s, owner_id))
+        owner = s.get(Owner, owner_id)
+        first_name = (owner.display_name.split() or [""])[0]
+        connected = [site_settings.display_name(site) for site in _owner_sites(s, owner_id)]
+        # a linked owner's /sites is locked: they choose systems on /settings
+        back = "/settings" if owner.telegram_chat_id is not None else "/sites"
     return templates.TemplateResponse(
         request, "connect.html",
-        {"first_name": first_name, "has_sites": has_sites, "csrf": csrf},
+        {"first_name": first_name, "connected": connected, "csrf": csrf, "back": back},
     )
 
 
@@ -277,27 +282,71 @@ async def connect_site_start(request: Request, csrf: str = Form("")):
     return RedirectResponse(urlsplit(url).path, status_code=303)
 
 
+def banner(request: Request, s, owner_id: int) -> dict | None:
+    """The after-connect banner from ``?connected=<id>`` or ``?already=<id>``, only for a
+    site of this owner (anything else shows no banner). Shared with /settings."""
+    for kind in ("connected", "already"):
+        raw = request.query_params.get(kind)
+        if raw is None:
+            continue
+        if not (raw.isascii() and raw.isdigit() and len(raw) <= 18):  # fits a SQLite integer
+            return None
+        site = s.get(Site, int(raw))
+        if site is None or site.owner_id != owner_id:
+            return None
+        return {"kind": kind, "name": site_settings.display_name(site)}
+    return None
+
+
+def tariff_text(tariff: Decimal | None) -> str:
+    return "" if tariff is None else f"{tariff.normalize():f}"
+
+
+def site_field_rows(sites: list[Site], form=None,
+                    errors: dict[int, dict[str, str]] | None = None) -> list[dict]:
+    """Rows for ``_site_fields.html``: the stored values, or the submitted ones when a
+    form is re-rendered (``form``), with each site's field errors. Shared with /settings."""
+    rows = []
+    chosen = site_settings.monitored_choices(form, sites) if form is not None else {}
+    for site in sites:
+        sid = site.se_site_id
+        stored = {"name": site_settings.display_name(site), "basis": site.income_basis,
+                  "tariff": tariff_text(site.tariff_ils_per_kwh)}
+        if form is not None:
+            for field in stored:
+                value = form.get(f"{field}_{sid}")
+                if value is not None:
+                    stored[field] = str(value)
+        p = price_site(site)
+        rows.append({
+            "id": sid,
+            "title": site_settings.display_name(site),
+            **stored,
+            "errors": (errors or {}).get(sid, {}),
+            "monitored": chosen.get(sid, site.monitored),
+            "portal_kw": site.peak_power_kwp_reported,
+            "price": describe_price(p.agorot, p.is_estimate),
+        })
+    return rows
+
+
+def site_today(c):
+    """Site-local today, for recomputing this month's income on save."""
+    return lambda site: c.clock.now().astimezone(ZoneInfo(site.tz)).date()
+
+
 def _sites_page(request: Request, owner_id: int, csrf: str, *, error: str | None = None,
-                status: int = 200, ticked: set[str] | None = None):
-    """``ticked`` (the submitted ids) replaces the stored flags when re-rendering a form."""
+                status: int = 200, form=None, errors: dict[int, dict[str, str]] | None = None):
+    """``form`` (the submitted values) replaces the stored ones when re-rendering."""
     c = _container(request)
     with session_scope(c.session_factory) as s:
         linked = s.get(Owner, owner_id).telegram_chat_id is not None
-        rows = []
-        for site in _owner_sites(s, owner_id):
-            p = price_site(site)
-            rows.append({
-                "id": site.se_site_id,
-                "name": site.card_name or site.portal_name,
-                "monitored": (site.monitored if ticked is None
-                              else str(site.se_site_id) in ticked),
-                "portal_kw": site.peak_power_kwp_reported,
-                "price": describe_price(p.agorot, p.is_estimate),
-            })
+        rows = site_field_rows(_owner_sites(s, owner_id), form, errors)
+        shown = banner(request, s, owner_id)
     return templates.TemplateResponse(
         request, "sites.html",
         {"sites": rows, "linked": linked, "csrf": csrf, "error": error,
-         "via_bot": CHANGES_VIA_BOT},
+         "via_bot": CHANGES_VIA_BOT, "banner": shown},
         status_code=status,
     )
 
@@ -319,18 +368,20 @@ async def sites_save(request: Request):
     form = await request.form()
     if not _csrf_ok(request, str(form.get("csrf", ""))):
         return _message(request, FORM_EXPIRED, 403)
-    ticked = {str(v) for v in form.getlist("site")}
     c = _container(request)
     with session_scope(c.session_factory) as s:
         if s.get(Owner, owner_id).telegram_chat_id is not None:
             return _message(request, CHANGES_VIA_BOT, 409, bot_link=True)
-        own = _owner_sites(s, owner_id)
-        picked = any(str(site.se_site_id) in ticked for site in own)  # ids of others ignored
-        if picked:
-            for site in own:
-                site.monitored = str(site.se_site_id) in ticked
+        # only this owner's sites are read: ids of others in the form are ignored
+        owned = _owner_sites(s, owner_id)
+        edits, errors = site_settings.parse_site_form(form, owned)
+        picked = any(site_settings.monitored_choices(form, owned).values())
+        if picked and not errors:
+            site_settings.apply_edits(s, owner_id, edits, site_today(c))
+    if errors:
+        return _sites_page(request, owner_id, csrf, status=400, form=form, errors=errors)
     if not picked:
-        return _sites_page(request, owner_id, csrf, error=PICK_ONE, status=400, ticked=ticked)
+        return _sites_page(request, owner_id, csrf, error=PICK_ONE, status=400, form=form)
     return RedirectResponse("/price", status_code=303)
 
 
@@ -349,12 +400,14 @@ async def price(request: Request):
     c = _container(request)
     with session_scope(c.session_factory) as s:
         monitored, agorot, estimate = _monitored_total(s, owner_id)
-        names = [site.card_name or site.portal_name for site in monitored]
+        rows = [{"name": site_settings.display_name(site),
+                 "price": describe_price(p.agorot, p.is_estimate)}
+                for site, p in ((site, price_site(site)) for site in monitored)]
     if not monitored:
         return RedirectResponse("/sites", status_code=303)
     return templates.TemplateResponse(
         request, "price.html",
-        {"names": names, "total": describe_price(agorot, estimate), "csrf": csrf},
+        {"rows": rows, "total": describe_price(agorot, estimate), "csrf": csrf},
     )
 
 

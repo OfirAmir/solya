@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block content %}
+    <section class="card">
+      {% with done_form = none %}{% include "_banner.html" %}{% endwith %}
+      <h1>ההגדרות</h1>
+      {% if saved %}<p class="message" role="status">{{ saved }}</p>{% endif %}
+      {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+      {% if sites %}
+      <form class="grid" id="settings" action="/settings" method="post">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        {% for site in sites %}
+        <div class="site-block">
+        <label class="site">
+          <input type="checkbox" name="site" value="{{ site.id }}"{% if site.monitored %} checked{% endif %}>
+          <span>
+            <strong>{{ site.title }}</strong>
+            <span class="note">מעקב · מזהה <bdi>{{ site.id }}</bdi></span>
+            {% if site.portal_kw is not none %}<span class="note">הספק בפורטל <bdi>{{ site.portal_kw }}</bdi> קילוואט, משמש להערכה בלבד</span>{% endif %}
+            <span class="price">{{ site.price }}</span>
+          </span>
+        </label>
+        {% include "_site_fields.html" %}
+        </div>
+        {% endfor %}
+        <p class="note">סה״כ למערכות במעקב:</p>
+        <p class="total">{{ total }}</p>
+        <div class="row">
+          <button type="submit">שמירה</button>
+        </div>
+      </form>
+      {% else %}
+      <p>עדיין אין מערכת מחוברת.</p>
+      {% endif %}
+      <form class="row" action="/connect-site" method="post">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit" class="button secondary">חיבור מערכת נוספת</button>
+      </form>
+    </section>
+{% endblock %}
