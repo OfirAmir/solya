@@ -125,14 +125,14 @@ Do these steps in order.
 
 Owners manage their own systems; the admin does not have to run `sites set`.
 
-- **`/sites`** lists the connected systems. For each one the owner picks whether to monitor it, and sets the name, the tariff (0.05 to 3.00 ₪/kWh, up to 4 decimals; "0,48", "₪0.48" and "0.48 ₪" are accepted) and the income basis (production or export). Name is 1 to 30 characters.
+- **`/sites`** lists the connected systems. Editing there applies only before the owner links Telegram; once the chat is linked the page is locked and the owner uses `/settings` instead. For each system the owner picks whether to monitor it, and sets the name, the tariff (0.05 to 3.00 ₪/kWh, up to 4 decimals; "0,48", "₪0.48" and "0.48 ₪" are accepted) and the income basis (production or export). Name is 1 to 30 characters.
 - **`/settings`**: the owner sends `/settings` to the bot. The bot replies with a single-use link that is valid for 15 minutes. The link opens a confirm page (nothing happens on the GET); after the owner presses the button, a web session starts and lasts 24 hours. The link is stored hashed. A second use or an old link shows the "expired" page. Free text works too: "הגדרות" or "תעריף" gets the settings link, and a connect phrase such as "תחבר לי עוד מערכת" gets the SolarEdge connect link.
-- When the owner changes the set of monitored systems on the settings page, the admin gets a notice that includes the new monthly price.
-- **Commands menu.** At startup the bot registers its commands with Telegram (`set_my_commands`), so they show in the menu next to the message box. Invisible direction marks that Telegram adds to copied commands are stripped before the command is read.
+- When the owner changes the set of monitored systems on the settings page, the admin gets a notice that says, per system, whether monitoring started or stopped, with the new monthly price. Today's jobs are re-planned at once, so a newly ticked system gets tonight's report. A system connected after the page was opened (for example in another tab) is not on the submitted form and keeps its monitoring.
+- **Commands menu.** At startup the bot registers its commands with Telegram (`set_my_commands`), so they show in the menu next to the message box. A command copied out of a Hebrew message carries invisible direction marks from that text (Telegram then does not see it as a command); the marks are stripped before the command is read, and the words after it are kept, so a copied `/start <code>` still works.
 
 ### Backfill
 
-When an owner connects a system, and once at startup, Solya fills the month so far from SolarEdge, so the month figures are not empty. It uses at most 2 API credits per site per calendar month (energy and meter telemetry), at the lowest ("optional") priority. It writes only days before today (site-local) that have no row yet. Today's row belongs to the evening pull and existing rows are never changed.
+When an owner connects a system, and once at startup, Solya fills the month so far from SolarEdge, so the month figures are not empty. It uses at most 2 API credits per site per calendar month (energy and meter telemetry), at the lowest ("optional") priority. A failed call is not credited and is retried at the next start; for an export-basis system a failed meter call writes nothing (the retry reuses the stored energy answer), while a 404 means no meter. It writes only days before today (site-local) that have no row yet. Today's row belongs to the evening pull and existing rows are never changed.
 
 ## Web journey
 
