@@ -78,6 +78,7 @@ def test_report_one_job_per_owner(settings):
 
 
 def test_midday_only_commercial(settings):
+    settings.default_check_times = ["12:30"]  # midday checks are opt-in; this test covers them
     home = make_site(1)
     farm = make_site(2, commercial=True)
     custom = make_site(3, commercial=True, check_times=["11:00", "15:00"])
@@ -142,6 +143,7 @@ class FakeReporter:
 
 
 async def test_scheduler_service_start_smoke(db, settings):
+    settings.default_check_times = ["12:30"]  # midday checks are opt-in; this test covers them
     # A future local day so no planned job can fire while the test runs.
     day = datetime.now(timezone.utc).astimezone(ZoneInfo(TZ)).date() + timedelta(days=2)
     clock = FixedClock(datetime.combine(day, time(0, 10), ZoneInfo(TZ)))
@@ -260,3 +262,13 @@ async def test_startup_backfill_active_monitored_and_name_defaults(db, settings)
     with session_scope(db) as s:
         assert s.get(Site, 1).card_name
         assert s.get(Site, 4).card_name == "x"
+
+
+def test_no_midday_checks_by_default(settings):
+    """One evening pull a day by default: commercial sites get no midday check unless
+    DEFAULT_CHECK_TIMES or the site's own check_times say so."""
+    farm = make_site(2, commercial=True)
+    custom = make_site(3, commercial=True, check_times=["11:00"])
+    jobs = plan_day_jobs([farm, custom], DAY, settings)
+    assert [j.target for j in of_kind(jobs, "midday_check")] == [3]
+    assert sorted(j.target for j in of_kind(jobs, "evening_pull")) == [2, 3]

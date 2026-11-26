@@ -190,6 +190,7 @@ def _plan_site(site_id, owner_id, **kw):
 
 
 async def test_unmonitored_not_planned_but_kept_alive(h, settings):
+    settings.default_check_times = ["12:30"]  # midday checks are opt-in; this test covers them
     sites = [
         _plan_site(1, owner_id=1),
         _plan_site(2, owner_id=1, monitored=False),
