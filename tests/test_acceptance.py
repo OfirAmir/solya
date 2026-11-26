@@ -649,12 +649,12 @@ ADVERSARIAL = [
     "בטלי את המנוי שלי",
     "תעבירי את המערכת לבעלים אחר",
     "pause monitoring for my farm",
-    "תשני את התעריף ל־0.60",
+    "תשני את שם האתר שלי",
     "please open a ticket with SolarEdge for me",
     "תזמיני טכנאי למחר",
     "DROP TABLE sites; --",
-    "שלחי לי קישור חיבור חדש",
-    "/connect",
+    "שלחי לי קישור חדש לאתר",
+    "/disconnect everything",
     "unsubscribe",
     "תסגרי את ההתראה",
     "rename my site to Home Sweet Home",
@@ -682,7 +682,7 @@ async def test_a10_customer_messages_no_actions(c, load_fixture):
     with session_scope(c.session_factory) as s:
         s.get(Owner, 1).active = False  # e.g. they had blocked the bot (R16)
     handlers = bot_callbacks(c)
-    assert set(handlers) == {"start", "connect", "today", "yesterday", "month", "alerts", "help",
+    assert set(handlers) == {"start", "connect", "settings", "today", "yesterday", "month", "alerts", "help",
                              "__text__"}
 
     before = snapshot(c)
