@@ -47,7 +47,7 @@ class CardRow:
 class CardData:
     ray: float | None
     rows: list[CardRow]
-    total: tuple[float, Decimal] | None
+    total: tuple[float, Decimal | None] | None  # ₪ None: kWh-only total (mixed tariffs)
     header: str = ""
     site_count: int = 1
     footnote: str | None = None

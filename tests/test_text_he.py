@@ -299,3 +299,13 @@ def test_hebrew_date():
     from datetime import date
     assert he.hebrew_date(date(2026, 11, 25)) == "רביעי, 25 בנובמבר"
     assert he.hebrew_date(date(2026, 1, 4)) == "ראשון, 4 בינואר"
+
+
+def test_total_line_mixed_tariffs_kwh_only():
+    """Final fix 4 (spec section 1): with a site lacking income, the total shows kWh only."""
+    farm = ok_day("משק", 305900, "137.64")
+    home = SiteDay(2, "בית", "בית", "ok", production_wh=82600, income_ils=None)
+    out = _plain(he.daily_report("אורן", [farm, home], AT_1710, True))
+    total = [line for line in out.split("\n") if line.startswith("סה״כ")]
+    assert total == ["סה״כ: 388.5 קוט״ש"]
+    assert "משק: אין התראות פעילות. 305.9 קוט״ש, הכנסה 137.64 ₪" in out

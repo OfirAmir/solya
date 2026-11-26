@@ -255,6 +255,22 @@ async def test_closed_alert_followup(h, load_fixture):
     assert len(h.sent("fault")) == 2  # the alert and the follow-up
 
 
+async def test_report_mixed_tariffs_total_kwh_only(h, load_fixture, cards):
+    """Final fix 4 (spec section 1): one site without a tariff: the total shows kWh only,
+    in the text and on the card; the priced site keeps its ₪."""
+    with session_scope(h.db) as s:
+        s.get(Site, HOME).tariff_ils_per_kwh = None
+    await pull_both(h, load_fixture)
+    await h.reporter.evening_report(1, DAY)
+    (report,) = h.sent("report")
+    lines = report.text.split("\n")
+    assert "סה״כ: ‏402.0 קוט״ש" in lines
+    assert "משק: אין התראות פעילות. ‏317.0 קוט״ש, הכנסה ‏142.65 ₪" in lines
+    (data,) = cards
+    assert data.total == (402029.0, None)
+    assert [r.income_ils for r in data.rows] == [Decimal("142.65"), None]
+
+
 async def test_comm_loss_message_and_report(h, load_fixture, cards):
     stale = site_body(load_fixture, FARM, "2026-11-24T14:05:00+02:00")  # 3 h before 15:05Z
     for _ in range(2):  # the second stale pull must not repeat the message

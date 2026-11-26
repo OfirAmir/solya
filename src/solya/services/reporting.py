@@ -175,15 +175,17 @@ def build_owner_report(
         return None
     days = [_stored_day(session, site, len(sites), local_date, now) for site in shown]
     local_dt = now.astimezone(ZoneInfo(shown[0].tz))
+    # Spec section 1: a total for several sites with production; its ₪ only when every
+    # site has income (a partial ₪ sum next to the full kWh sum looks wrong)
     show_total = len(days) > 1 and all(
-        d.state == "ok" and d.production_wh is not None and d.income_ils is not None
-        for d in days
+        d.state == "ok" and d.production_wh is not None for d in days
     )
     total = None
     if show_total:
+        priced = all(d.income_ils is not None for d in days)
         total = (
             sum(d.production_wh for d in days),
-            sum((d.income_ils for d in days), Decimal("0")),
+            sum((d.income_ils for d in days), Decimal("0")) if priced else None,
         )
     header = he.hebrew_date(local_date)
     updates = [site.last_update_time for site in shown]

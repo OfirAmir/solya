@@ -84,3 +84,11 @@ def test_card_renders_status_labels_header_footnote():
     png = render_card(full)
     assert png.startswith(b"\x89PNG")
     assert _open(full).height > _open(plain).height
+
+
+def test_render_total_kwh_only():
+    """Final fix 4: a mixed-tariff total row has kWh and no ₪."""
+    rows = [_row(), CardRow("IL 360", 85039.0, None, None)]
+    im = Image.open(BytesIO(render_card(CardData(ray=None, rows=rows,
+                                                 total=(402029.0, None)))))
+    assert im.format == "PNG" and im.width == 1080
