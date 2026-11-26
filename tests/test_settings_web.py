@@ -321,3 +321,13 @@ def test_token_stored_hashed(tc, container):
         assert rows[0].token_hash == hashlib.sha256(token.encode()).hexdigest()
         assert all(token not in str(getattr(rows[0], c.name))
                    for c in SettingsLink.__table__.columns)
+
+
+def test_connect_page_back_link_goes_to_settings_when_linked(tc, container):
+    """Final fix 7: a linked owner's /sites is locked, so "back" goes to /settings."""
+    owner_id = _owner(container)
+    _add_site(container, owner_id, 111111)
+    _sign_in(tc, container, owner_id)
+    page = tc.get("/connect-site").text
+    assert '<a href="/settings">חזרה לבחירת המערכות</a>' in page
+    assert 'href="/sites"' not in page

@@ -257,11 +257,14 @@ async def connect_site(request: Request):
     owner_id, csrf = sess
     c = _container(request)
     with session_scope(c.session_factory) as s:
-        first_name = (s.get(Owner, owner_id).display_name.split() or [""])[0]
+        owner = s.get(Owner, owner_id)
+        first_name = (owner.display_name.split() or [""])[0]
         connected = [site_settings.display_name(site) for site in _owner_sites(s, owner_id)]
+        # a linked owner's /sites is locked: they choose systems on /settings
+        back = "/settings" if owner.telegram_chat_id is not None else "/sites"
     return templates.TemplateResponse(
         request, "connect.html",
-        {"first_name": first_name, "connected": connected, "csrf": csrf},
+        {"first_name": first_name, "connected": connected, "csrf": csrf, "back": back},
     )
 
 

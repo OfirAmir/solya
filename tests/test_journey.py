@@ -952,3 +952,10 @@ def test_sites_stale_form_keeps_new_site_monitored(tc, container):
                                 "present_111111": "1", "present_111112": "1"})
     assert r.status_code == 303
     assert _monitored(container) == {111111: False, 111112: True}
+
+
+def test_connect_page_back_link_goes_to_sites_before_linking(tc, container):
+    owner_id = _web_owner(tc, container)
+    _add_site(container, owner_id, 111111)
+    page = tc.get("/connect-site").text
+    assert '<a href="/sites">חזרה לבחירת המערכות</a>' in page
