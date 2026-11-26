@@ -124,8 +124,7 @@ async def settings_save(request: Request):
         # only this owner's sites are read: ids of others in the form are ignored
         sites = _owner_sites(s, owner_id)
         edits, errors = site_settings.parse_site_form(form, sites)
-        ticked = {str(v) for v in form.getlist("site")}
-        picked = any(str(site.se_site_id) in ticked for site in sites)
+        picked = any(site_settings.monitored_choices(form, sites).values())
         if picked and not errors:
             changed = site_settings.apply_edits(s, owner_id, edits, site_today(c))
             if changed:

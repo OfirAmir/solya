@@ -66,14 +66,34 @@ def validate_name(raw: str) -> str:
     return name
 
 
+PRESENT_PREFIX = "present_"
+
+
+def monitored_choices(form: Mapping, sites: list[Site]) -> dict[int, bool]:
+    """The monitoring each of ``sites`` gets from a submitted form. The page renders a
+    hidden ``present_{id}`` per site: a site whose marker is missing was not on the page
+    the owner saw (e.g. connected in another tab meanwhile), so it keeps its stored flag
+    rather than being unmonitored by an unticked box it never showed. A form with no
+    markers at all (a page rendered before the markers existed) reads every box."""
+    ticked = {str(v) for v in form.getlist("site")}
+    shown = {str(k)[len(PRESENT_PREFIX):] for k in form.keys()
+             if str(k).startswith(PRESENT_PREFIX)}
+    return {
+        site.se_site_id: (str(site.se_site_id) in ticked
+                          if not shown or str(site.se_site_id) in shown else site.monitored)
+        for site in sites
+    }
+
+
 def parse_site_form(
     form: Mapping, sites: list[Site]
 ) -> tuple[list[SiteEdit], dict[int, dict[str, str]]]:
     """Read ``name_{id}``, ``basis_{id}``, ``tariff_{id}`` and the ``site`` checkboxes
     for ``sites`` only (the caller passes this owner's sites; any other id in the form is
-    ignored). A field missing from the form keeps the stored value. Returns the edits of
+    ignored). A field missing from the form keeps the stored value, and a site not on the
+    submitted page keeps its monitoring (``monitored_choices``). Returns the edits of
     the sites without errors, and the errors as {site id: {field: message}}."""
-    ticked = {str(v) for v in form.getlist("site")}
+    monitored = monitored_choices(form, sites)
     edits: list[SiteEdit] = []
     errors: dict[int, dict[str, str]] = {}
     for site in sites:
@@ -104,7 +124,7 @@ def parse_site_form(
         if errs:
             errors[sid] = errs
         else:
-            edits.append(SiteEdit(sid, name, basis, tariff, str(sid) in ticked))
+            edits.append(SiteEdit(sid, name, basis, tariff, monitored[sid]))
     return edits, errors
 
 

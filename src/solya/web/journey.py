@@ -304,6 +304,7 @@ def site_field_rows(sites: list[Site], form=None,
     """Rows for ``_site_fields.html``: the stored values, or the submitted ones when a
     form is re-rendered (``form``), with each site's field errors. Shared with /settings."""
     rows = []
+    chosen = site_settings.monitored_choices(form, sites) if form is not None else {}
     for site in sites:
         sid = site.se_site_id
         stored = {"name": site_settings.display_name(site), "basis": site.income_basis,
@@ -319,8 +320,7 @@ def site_field_rows(sites: list[Site], form=None,
             "title": site_settings.display_name(site),
             **stored,
             "errors": (errors or {}).get(sid, {}),
-            "monitored": (site.monitored if form is None
-                          else str(sid) in {str(v) for v in form.getlist("site")}),
+            "monitored": chosen.get(sid, site.monitored),
             "portal_kw": site.peak_power_kwp_reported,
             "price": describe_price(p.agorot, p.is_estimate),
         })
@@ -370,8 +370,9 @@ async def sites_save(request: Request):
         if s.get(Owner, owner_id).telegram_chat_id is not None:
             return _message(request, CHANGES_VIA_BOT, 409, bot_link=True)
         # only this owner's sites are read: ids of others in the form are ignored
-        edits, errors = site_settings.parse_site_form(form, _owner_sites(s, owner_id))
-        picked = any(edit.monitored for edit in edits)
+        owned = _owner_sites(s, owner_id)
+        edits, errors = site_settings.parse_site_form(form, owned)
+        picked = any(site_settings.monitored_choices(form, owned).values())
         if picked and not errors:
             site_settings.apply_edits(s, owner_id, edits, site_today(c))
     if errors:

@@ -1,5 +1,6 @@
 {# Per-site settings fields (on /sites and /settings). Needs site: id, name, basis, tariff, errors. #}
         <div class="site-fields grid">
+          <input type="hidden" name="present_{{ site.id }}" value="1">
           <label>שם
             <input type="text" name="name_{{ site.id }}" value="{{ site.name }}">
           </label>

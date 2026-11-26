@@ -209,6 +209,25 @@ def test_settings_save_and_admin_notice(tc, container, channel):
     assert len([m for m in channel.sent if m.recipient == "999"]) == 1
 
 
+def test_settings_stale_form_keeps_new_site_monitored(tc, container, channel):
+    """Final fix 1: a system connected after the page was rendered is not in the POST;
+    it stays monitored and no admin notice is sent."""
+    owner_id = _owner(container)
+    _add_site(container, owner_id, 111111, name="בית", kw=26.55)
+    _sign_in(tc, container, owner_id)
+    page = tc.get("/settings").text
+    assert 'name="present_111111"' in page
+    _add_site(container, owner_id, 111112, name="משק", kw=65.52)  # connected meanwhile
+    r = tc.post("/settings", data={
+        "csrf": _csrf(page), "site": ["111111"], "present_111111": "1",
+        "name_111111": "בית", "basis_111111": "export", "tariff_111111": "0.48",
+    })
+    assert r.status_code == 200 and SAVED in r.text
+    assert _site(container, 111112).monitored is True
+    assert _site(container, 111111).tariff_ils_per_kwh == Decimal("0.48")
+    assert not [m for m in channel.sent if m.recipient == "999"]
+
+
 def test_settings_forged_site_ignored(tc, container):
     owner_id = _owner(container)
     other = _owner(container, chat=888)

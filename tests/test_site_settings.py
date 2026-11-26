@@ -253,3 +253,21 @@ def test_parse_site_form_unchanged_default_name_keeps_names():
     form = FormData([("site", "1"), ("name_1", "בית")])
     edits, _ = ss.parse_site_form(form, [one])
     assert edits[0].name == "בית"
+
+
+def test_parse_site_form_site_missing_from_rendered_form_keeps_monitoring():
+    """Final fix 1: a site connected after the page was rendered has no ``present_``
+    marker in the POST, so its stored monitoring (and other fields) are kept; a rendered
+    site left unticked is unmonitored."""
+    one, two = _sites()
+    form = FormData([("present_1", "1"), ("name_1", "בית"), ("basis_1", "export"),
+                     ("tariff_1", "0.48")])
+    edits, errors = ss.parse_site_form(form, [one, two])
+    assert errors == {}
+    assert edits == [
+        ss.SiteEdit(1, "בית", "export", Decimal("0.48"), False),
+        ss.SiteEdit(2, None, "production", None, True),
+    ]
+    assert ss.monitored_choices(form, [one, two]) == {1: False, 2: True}
+    two.monitored = False
+    assert ss.monitored_choices(form, [one, two]) == {1: False, 2: False}

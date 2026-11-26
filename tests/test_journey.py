@@ -934,3 +934,21 @@ def test_callback_schedules_backfill(tc, container, load_fixture, monkeypatch):
     assert seen == [FARM_ID, HOME_ID]
     _callback(tc, container, owner_id, farm)  # re-approval of a site they already have
     assert seen == [FARM_ID, HOME_ID]
+
+
+def test_sites_stale_form_keeps_new_site_monitored(tc, container):
+    """Final fix 1: a system connected after the picker was rendered is not on the
+    submitted page, so it keeps its monitoring."""
+    owner_id = _web_owner(tc, container)
+    _add_site(container, owner_id, 111111)
+    page = tc.get("/sites").text
+    assert 'name="present_111111"' in page
+    _add_site(container, owner_id, 111112)  # connected in another tab meanwhile
+    r = tc.post("/sites", data={"csrf": _csrf(page), "site": "111111", "present_111111": "1"})
+    assert r.status_code == 303
+    assert _monitored(container) == {111111: True, 111112: True}
+    # a rendered site left unticked is still unmonitored
+    r = tc.post("/sites", data={"csrf": _csrf(page), "site": "111112",
+                                "present_111111": "1", "present_111112": "1"})
+    assert r.status_code == 303
+    assert _monitored(container) == {111111: False, 111112: True}
