@@ -126,8 +126,8 @@ Do these steps in order.
 Owners manage their own systems; the admin does not have to run `sites set`.
 
 - **`/sites`** lists the connected systems. For each one the owner picks whether to monitor it, and sets the name, the tariff (0.05 to 3.00 ₪/kWh, up to 4 decimals; "0,48", "₪0.48" and "0.48 ₪" are accepted) and the income basis (production or export). Name is 1 to 30 characters.
-- **`/settings`**: the owner sends `/settings` to the bot. The bot replies with a single-use link that is valid for 15 minutes. The link opens a confirm page (nothing happens on the GET); after the owner presses the button, a web session starts and lasts 24 hours. The link is stored hashed. A second use or an old link shows the "expired" page. The same links are sent for the free text "תחבר לי עוד מערכת" and "תעריף".
-- When monitoring changes the price, the admin gets a notice.
+- **`/settings`**: the owner sends `/settings` to the bot. The bot replies with a single-use link that is valid for 15 minutes. The link opens a confirm page (nothing happens on the GET); after the owner presses the button, a web session starts and lasts 24 hours. The link is stored hashed. A second use or an old link shows the "expired" page. Free text works too: "הגדרות" or "תעריף" gets the settings link, and a connect phrase such as "תחבר לי עוד מערכת" gets the SolarEdge connect link.
+- When the owner changes the set of monitored systems on the settings page, the admin gets a notice that includes the new monthly price.
 - **Commands menu.** At startup the bot registers its commands with Telegram (`set_my_commands`), so they show in the menu next to the message box. Invisible direction marks that Telegram adds to copied commands are stripped before the command is read.
 
 ### Backfill
