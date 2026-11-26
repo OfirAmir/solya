@@ -1,7 +1,7 @@
 """Hebrew message templates (Sol speaks feminine Hebrew). Plain functions, no Jinja."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 from solya.rules.daily import FaultView, SiteDay
@@ -49,8 +49,30 @@ def _in_serial(serial: str | None) -> str:
     return f" בממיר {serial}" if serial else ""
 
 
-def _figures(wh: float, income: Decimal | None) -> str:
-    return fmt_kwh(wh) if income is None else f"{fmt_kwh(wh)}, {fmt_ils(income)}"
+TARIFF_HINT = "כדי לראות הכנסה, שלחו /settings והזינו תעריף."
+
+_WEEKDAYS = ["שני", "שלישי", "רביעי", "חמישי", "שישי", "שבת", "ראשון"]  # Monday first
+_MONTHS = [
+    "ינואר", "פברואר", "מרץ", "אפריל", "מאי", "יוני",
+    "יולי", "אוגוסט", "ספטמבר", "אוקטובר", "נובמבר", "דצמבר",
+]
+
+
+def hebrew_date(d: date) -> str:
+    return f"{_WEEKDAYS[d.weekday()]}, {d.day} ב{_MONTHS[d.month - 1]}"
+
+
+def income_phrase(d: SiteDay) -> str:
+    if d.income_ils is None:
+        return ""
+    label = "הכנסה מהזרמה" if d.income_basis == "export" else "הכנסה"
+    return f"{label} {fmt_ils(d.income_ils)}"
+
+
+def _figures(d: SiteDay) -> str:
+    phrase = income_phrase(d)
+    kwh = fmt_kwh(d.production_wh)
+    return f"{kwh}, {phrase}" if phrase else kwh
 
 
 def daily_report(name: str, days: list[SiteDay], local_dt: datetime, show_total: bool) -> str:
@@ -79,14 +101,16 @@ def daily_report(name: str, days: list[SiteDay], local_dt: datetime, show_total:
             continue
         ray = f"RAY {int(round(d.ray))}, " if d.ray is not None else ""
         prefix = "" if d.open_faults else "אין התראות פעילות. "
-        lines.append(f"{d.label}: {prefix}{ray}{_figures(d.production_wh, d.income_ils)}")
+        lines.append(f"{d.label}: {prefix}{ray}{_figures(d)}")
 
     if show_total:
         shown = [d for d in days if d.state == "ok" and d.production_wh is not None]
         total_wh = sum(d.production_wh for d in shown)
         incomes = [d.income_ils for d in shown if d.income_ils is not None]
-        total_income = sum(incomes, Decimal("0")) if incomes else None
-        lines.append(f"סה״כ: {_figures(total_wh, total_income)}")
+        total = fmt_kwh(total_wh)
+        if incomes:
+            total += f", {fmt_ils(sum(incomes, Decimal('0')))} לפני מע״מ"
+        lines.append(f"סה״כ: {total}")
 
     lines.append(_FOLLOW_UP if any_fault else "לכל שאלה אני כאן. המשך ערב טוב.")
     return rtl_text("\n".join(lines))

@@ -37,9 +37,9 @@ CREDIT_USD = Decimal("0.005")
 
 REGRESSION = (
     "ערב טוב אורן,\n"
-    "משק: אין התראות פעילות. ‏317.0 קוט״ש, ‏142.65 ₪\n"
-    "בית: אין התראות פעילות. ‏85.0 קוט״ש, ‏38.03 ₪\n"
-    "סה״כ: ‏402.0 קוט״ש, ‏180.68 ₪\n"
+    "משק: אין התראות פעילות. ‏317.0 קוט״ש, הכנסה ‏142.65 ₪\n"
+    "בית: אין התראות פעילות. ‏85.0 קוט״ש, הכנסה מהזרמה ‏38.03 ₪\n"
+    "סה״כ: ‏402.0 קוט״ש, ‏180.68 ₪ לפני מע״מ\n"
     "לכל שאלה אני כאן. המשך ערב טוב."
 )
 
@@ -187,11 +187,11 @@ async def test_a1_report_numbers_match_source(c, load_fixture, cards):
     home_income = (Decimal(home["toGrid"]) / 1000 * Decimal("0.48")).quantize(Decimal("0.01"), ROUND_HALF_UP)
     assert (farm_income, home_income) == (Decimal("142.65"), Decimal("38.03"))  # handover §1.4
 
-    assert f"{RLM}{fmt_kwh(farm['total'])}, {RLM}{fmt_ils(farm_income)}" in site_line(report.text, "משק")
-    assert f"{RLM}{fmt_kwh(home['total'])}, {RLM}{fmt_ils(home_income)}" in site_line(report.text, "בית")
+    assert f"{RLM}{fmt_kwh(farm['total'])}, הכנסה {RLM}{fmt_ils(farm_income)}" in site_line(report.text, "משק")
+    assert f"{RLM}{fmt_kwh(home['total'])}, הכנסה מהזרמה {RLM}{fmt_ils(home_income)}" in site_line(report.text, "בית")
     total_wh = farm["total"] + home["total"]
     assert site_line(report.text, "סה״כ") == (
-        f"סה״כ: {RLM}{fmt_kwh(total_wh)}, {RLM}{fmt_ils(farm_income + home_income)}"
+        f"סה״כ: {RLM}{fmt_kwh(total_wh)}, {RLM}{fmt_ils(farm_income + home_income)} לפני מע״מ"
     )
 
     (data,) = cards
@@ -217,7 +217,7 @@ async def test_a2_comm_loss_states_no_production(c, load_fixture, cards):
         assert re.findall(r"\d+(?:\.\d+)?", t.replace("14:05", "")) == []  # no figures
     assert "317.0" not in report.text and "142.65" not in report.text
     assert "סה״כ" not in report.text
-    assert site_line(report.text, "בית") == f"בית: אין התראות פעילות. {RLM}85.0 קוט״ש, {RLM}38.03 ₪"
+    assert site_line(report.text, "בית") == f"בית: אין התראות פעילות. {RLM}85.0 קוט״ש, הכנסה מהזרמה {RLM}38.03 ₪"
 
     (data,) = cards
     farm_row = data.rows[0]

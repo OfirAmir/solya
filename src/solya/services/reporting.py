@@ -121,6 +121,7 @@ def _stored_day(
         state="ok",
         open_faults=open_fault_views(s, site.se_site_id),
         kwp=site.billing_kwp_override or site.peak_power_kwp_reported,
+        income_basis=site.income_basis,
     )
     if site.status == "reauth_needed":
         day.state = "reauth_needed"

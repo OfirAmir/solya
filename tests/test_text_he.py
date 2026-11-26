@@ -29,9 +29,9 @@ def test_report_regression_20261124():
     out = he.daily_report("אורן", two_ok(), AT_1710, True)
     assert out == (
         "ערב טוב אורן,\n"
-        "משק: אין התראות פעילות. ‏317.0 קוט״ש, ‏142.65 ₪\n"
-        "בית: אין התראות פעילות. ‏85.0 קוט״ש, ‏38.03 ₪\n"
-        "סה״כ: ‏402.0 קוט״ש, ‏180.68 ₪\n"
+        "משק: אין התראות פעילות. ‏317.0 קוט״ש, הכנסה ‏142.65 ₪\n"
+        "בית: אין התראות פעילות. ‏85.0 קוט״ש, הכנסה ‏38.03 ₪\n"
+        "סה״כ: ‏402.0 קוט״ש, ‏180.68 ₪ לפני מע״מ\n"
         "לכל שאלה אני כאן. המשך ערב טוב."
     )
 
@@ -85,7 +85,7 @@ def test_report_with_fault_line_and_closing():
         f"משק: התראה פתוחה {RLM}FAN_ALERT_1 בממיר {RLM}7E04E44D-B3. "
         f"מומלץ לפתוח קריאת שירות מול {RLM}SolarEdge או להזמין טכנאי מוסמך."
     )
-    assert lines[2] == f"משק: {RLM}317.0 קוט״ש, {RLM}142.65 ₪"
+    assert lines[2] == f"משק: {RLM}317.0 קוט״ש, הכנסה {RLM}142.65 ₪"
     assert lines[-1] == "עדכן אותי ואעקוב עד לסיום הטיפול."
 
 
@@ -261,3 +261,35 @@ def test_rlm_idempotent():
 def test_rlm_not_before_leading_latin_or_without_hebrew():
     assert rlm_tokens("abc def") == "abc def"
     assert rlm_tokens("https://x.y/z?a=1") == "https://x.y/z?a=1"
+
+
+def _plain(s):
+    return s.replace(RLM, "")
+
+
+def test_daily_report_income_labels():
+    from datetime import date  # noqa: F401
+    farm = ok_day("משק", 305900, "137.64")
+    home = ok_day("בית", 82600, "35.98", income_basis="export")
+    out = _plain(he.daily_report("אורן", [farm, home], AT_1710, True))
+    assert "משק: אין התראות פעילות. 305.9 קוט״ש, הכנסה 137.64 ₪" in out
+    assert "בית: אין התראות פעילות. 82.6 קוט״ש, הכנסה מהזרמה 35.98 ₪" in out
+
+
+def test_total_line_before_vat():
+    farm = ok_day("משק", 305900, "137.64")
+    home = ok_day("בית", 82600, "35.98", income_basis="export")
+    out = _plain(he.daily_report("אורן", [farm, home], AT_1710, True))
+    assert "סה״כ: 388.5 קוט״ש, 173.62 ₪ לפני מע״מ" in out
+
+
+def test_no_tariff_kwh_only():
+    d = SiteDay(1, "משק", "משק", "ok", production_wh=1000, income_ils=None)
+    out = he.daily_report("אורן", [d], AT_1710, False)
+    assert "הכנסה" not in out
+
+
+def test_hebrew_date():
+    from datetime import date
+    assert he.hebrew_date(date(2026, 11, 25)) == "רביעי, 25 בנובמבר"
+    assert he.hebrew_date(date(2026, 1, 4)) == "ראשון, 4 בינואר"
