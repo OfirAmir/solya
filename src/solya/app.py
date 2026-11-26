@@ -103,6 +103,7 @@ def build_container(
         factory, client, tokens, outbox, container.channel, clock, settings, ray,
         lambda sid, at: container.scheduler.schedule_retry(sid, at),
         replan_owner=lambda owner_id: container.scheduler.plan_owner(owner_id),
+        http=http,
     )
     container.scheduler = SchedulerService(container.reporter, factory, settings, clock)
     return container

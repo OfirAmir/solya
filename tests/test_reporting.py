@@ -139,6 +139,7 @@ async def h(db, settings, clock):
             db, client, tokens, Outbox(db, clock), channel, clock, settings, NullRay(),
             lambda sid, at: retries.append((sid, at)),
             delay_send=lambda seconds, factory: delayed.append((seconds, factory)),
+            http=http,
         )
         box["reporter"] = reporter
         yield Harness(db, clock, channel, reporter, tokens, retries, delayed)

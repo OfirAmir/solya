@@ -13,9 +13,11 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
+import httpx
 from sqlalchemy import func, inspect, select
 from sqlalchemy.orm import Session
 
+from solya import weather
 from solya.clock import Clock
 from solya.config import Settings
 from solya.db import SessionFactory, session_scope
@@ -217,7 +219,9 @@ class Reporter:
         schedule_retry: ScheduleRetry,
         delay_send: DelaySend | None = None,
         replan_owner: Callable[[int], None] | None = None,
+        http: httpx.AsyncClient | None = None,
     ) -> None:
+        self._http = http
         self._sf = session_factory
         self._client = client
         self._tokens = tokens
@@ -266,6 +270,16 @@ class Reporter:
         Returns None when the pull was skipped (unknown or inactive site, auth, budget)."""
         return await self._pull_and_process(site_id, kind, None, notify=notify)
 
+    async def _store_weather(
+        self, site_id: int, lat: float, lon: float, tz: str, local_date: date
+    ) -> None:
+        try:
+            day = await weather.fetch_day(self._http, lat, lon, tz, local_date)
+            with session_scope(self._sf) as s:
+                weather.store_day(s, site_id, local_date, day, self._clock.now())
+        except Exception as exc:  # noqa: BLE001 - weather must never block the report
+            log.warning("site %s weather not stored: %s", site_id, type(exc).__name__)
+
     async def _pull_and_process(
         self, site_id: int, kind: str, local_date: date | None, notify: bool = True
     ) -> PullBundle | None:
@@ -280,6 +294,7 @@ class Reporter:
                 return None
             tz = site.tz
             call_plan = site.call_plan
+            lat, lon = site.lat, site.lon
             # R1: the evening status window covers the whole daylight period.
             daylight = True if kind == "evening" else is_daylight(site, now)
         if local_date is None:
@@ -300,6 +315,15 @@ class Reporter:
         if kind == "midday" and _budget_refused(bundle):
             log.warning("site %s: credit budget exceeded; midday check skipped", site_id)
             return None
+
+        if (
+            kind == "evening"
+            and self._settings.ray_implementation
+            and self._http is not None
+            and lat is not None
+            and lon is not None
+        ):
+            await self._store_weather(site_id, lat, lon, tz, local_date)
 
         outgoing, no_data = self._process(site_id, kind, local_date, bundle, daylight, notify)
         if not notify:

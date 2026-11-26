@@ -214,3 +214,15 @@ class LlmUsage(Base):
     ts: Mapped[datetime] = mapped_column(UTCDateTime)
     input_tokens: Mapped[int] = mapped_column(Integer)
     output_tokens: Mapped[int] = mapped_column(Integer)
+
+
+class WeatherDaily(Base):
+    __tablename__ = "weather_daily"
+
+    site_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    local_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    cloud_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    tmax_c: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pm10: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source: Mapped[str] = mapped_column(String)
+    fetched_at: Mapped[datetime] = mapped_column(UTCDateTime)
