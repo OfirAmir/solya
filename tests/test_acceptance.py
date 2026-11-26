@@ -329,6 +329,7 @@ async def replay_november(c, clock, load_fixture):
 
 
 async def test_a6_30_day_budget(settings, load_fixture, capsys):
+    settings.default_check_times = ["12:30"]  # midday checks are opt-in; this test covers them
     clock = FixedClock(datetime(2026, 11, 1, 0, 0, tzinfo=TZ))
     c = make_container(settings, clock)
     try:

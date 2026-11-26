@@ -194,7 +194,7 @@ Run inside the running container (`docker compose exec solya solya <command>`). 
 
 ### When changes take effect
 
-The service plans each day's jobs (evening pulls, mid-day checks, evening reports) at 00:05 Israel time, and again whenever it starts.
+The service plans each day's jobs (evening pulls, evening reports, and mid-day checks if configured) at 00:05 Israel time, and again whenever it starts. By default there is one SolarEdge pull per site per day, about 25 minutes after that site's sunset (computed from its coordinates). Mid-day checks for commercial sites are off by default; turn them on for all commercial sites with `DEFAULT_CHECK_TIMES='["12:30"]'`, or for one site with `sites set --site ID --check-times 12:30`. SolarEdge has no webhook for alerts, so faults are found at the evening pull (or a mid-day check, if enabled).
 
 - **A newly connected site** is planned straight away: a site connected in the afternoon gets that evening's pull and report. Connecting soon after sunset still runs that evening's pull, and the report follows 5 minutes later.
 - **CLI changes** (`sites set` with `--commercial`, `--check-times` or `--status`, and the other options) run in a separate process, so the running service sees them at the next 00:05 planning or after a restart (`docker compose restart solya`). Labels, card names, owner names, tariffs and the income basis are read from the database on every pull and message, so they apply from the next one without a restart. A restart after sunset re-runs that evening's pulls and, 5 minutes later, the report; a report already sent is not sent again.

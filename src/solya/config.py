@@ -43,7 +43,9 @@ class Settings(BaseSettings):
     weak_max_cloud_pct: float = 70
     evening_pull_offset_minutes: int = 25
     report_offset_minutes: int = 30
-    default_check_times: list[str] = ["12:30"]
+    # Midday checks for commercial sites are off by default: one evening pull a day
+    # (the owner's choice, to save API credits). Set e.g. ["12:30"] to turn them on.
+    default_check_times: list[str] = []
     connect_token_ttl_minutes: int = 15
     ray_implementation: str | None = None
     default_timezone: str = "Asia/Jerusalem"
