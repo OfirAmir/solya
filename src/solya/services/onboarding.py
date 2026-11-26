@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from solya.config import Settings
 from solya.rules.faults import ack_owner_faults
 from solya.models import ConnectRequest, Invite, Owner, Site
+from solya.services.site_settings import default_basis, short_name
 from solya.solaredge.models import SiteInfo
 
 log = logging.getLogger(__name__)
@@ -216,11 +217,14 @@ def register_site(
             session.scalar(select(func.count()).select_from(Site).where(Site.owner_id == req.owner_id))
             == 0
         )
+        commercial = (info.peak_power_kwp or 0) >= COMMERCIAL_KWP
         site = Site(
             se_site_id=info.site_id,
             owner_id=req.owner_id,
             portal_name=info.name,
-            commercial=(info.peak_power_kwp or 0) >= COMMERCIAL_KWP,
+            card_name=short_name(info.name),
+            income_basis=default_basis(commercial),
+            commercial=commercial,
             peak_power_kwp_reported=info.peak_power_kwp,
             tz=info.timezone,
             lat=info.lat,

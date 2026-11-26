@@ -63,7 +63,7 @@ def effective_label(site: Site, owner_site_count: int) -> str:
         return site.label_he
     if owner_site_count <= 1:
         return SINGLE_SITE_LABEL
-    return site.portal_name
+    return site.card_name or site.portal_name
 
 
 def compute_site_day(
