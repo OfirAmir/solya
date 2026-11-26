@@ -21,6 +21,7 @@ INVALID_LINK = "הקישור אינו בתוקף. שלחו /connect בבוט כ�
 CANCELLED = "החיבור בוטל או נכשל. אפשר לנסות שוב עם /connect."
 CONNECTED = "המערכת חוברה בהצלחה. אפשר לחזור לטלגרם."
 SITE_PICKER = "/sites"
+SETTINGS_PAGE = "/settings"
 FAILED = "משהו השתבש בחיבור המערכת. אפשר לנסות שוב עם /connect."
 # F1: a web sign-up with no Telegram chat cannot use /connect in the bot; it retries on
 # the web instead, with a button back to the connect page.
@@ -155,13 +156,21 @@ async def oauth_callback(
             req = s.get(onboarding.ConnectRequest, token)
             site, is_first = onboarding.register_site(s, req, info, c.clock.now())
             sid, new_owner = site.se_site_id, site.owner_id
-            to_picker = _continue_on_web(s.get(Owner, new_owner))
-        await c.reporter.on_site_connected(sid, is_first)
+            owner = s.get(Owner, new_owner)
+            to_picker = _continue_on_web(owner)
+            linked = owner.telegram_chat_id is not None
+        already = previous_owner == new_owner
+        await c.reporter.on_site_connected(sid, is_first, already=already)
         if previous_owner is not None and previous_owner != new_owner:
             await c.reporter.on_site_reassigned(sid, previous_owner, new_owner)
     except Exception as e:
         log.error("oauth callback failed after the site access check: %s", type(e).__name__)
         return _failure(request, FAILED, 502, owner_id)
+    banner = f"{'already' if already else 'connected'}={sid}"
     if to_picker:
-        return RedirectResponse(SITE_PICKER, status_code=303)
+        return RedirectResponse(f"{SITE_PICKER}?{banner}", status_code=303)
+    # a linked owner who started from their settings page (a live session of the same
+    # owner) goes back there; the Telegram /connect link has no session and gets the page
+    if linked and c.sessions.read(request.cookies.get(journey.SESSION_COOKIE)) == new_owner:
+        return RedirectResponse(f"{SETTINGS_PAGE}?{banner}", status_code=303)
     return _html(CONNECTED)

@@ -1,7 +1,7 @@
 """Owner-editable site settings: names, income basis, tariff, monitoring."""
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -14,6 +14,8 @@ from solya.rules.daily import income
 
 NAME_ERROR = "שם המערכת צריך להיות באורך 1 עד 30 תווים"
 TARIFF_ERROR = "התעריף צריך להיות מספר בין 0.05 ל-3.00"
+BASIS_ERROR = "יש לבחור איך מקבלים תשלום"
+BASES = ("production", "export")
 
 MAX_NAME_LEN = 30
 _TARIFF_MIN, _TARIFF_MAX = Decimal("0.05"), Decimal("3.00")
@@ -22,7 +24,7 @@ _TARIFF_MIN, _TARIFF_MAX = Decimal("0.05"), Decimal("3.00")
 @dataclass(frozen=True)
 class SiteEdit:
     site_id: int
-    name: str
+    name: str | None  # None keeps the stored names
     basis: str
     tariff: Decimal | None
     monitored: bool
@@ -30,6 +32,12 @@ class SiteEdit:
 
 def short_name(portal_name: str) -> str:
     return portal_name.split(" - ", 1)[0].strip()[:MAX_NAME_LEN]
+
+
+def display_name(site: Site) -> str:
+    """The name shown to the owner: their own label, else the card name, else the
+    shortened portal name."""
+    return site.label_he or site.card_name or short_name(site.portal_name)
 
 
 def default_basis(commercial: bool) -> str:
@@ -58,6 +66,44 @@ def validate_name(raw: str) -> str:
     return name
 
 
+def parse_site_form(
+    form: Mapping, sites: list[Site]
+) -> tuple[list[SiteEdit], dict[int, dict[str, str]]]:
+    """Read ``name_{id}``, ``basis_{id}``, ``tariff_{id}`` and the ``site`` checkboxes
+    for ``sites`` only (the caller passes this owner's sites; any other id in the form is
+    ignored). A field missing from the form keeps the stored value. Returns the edits of
+    the sites without errors, and the errors as {site id: {field: message}}."""
+    ticked = {str(v) for v in form.getlist("site")}
+    edits: list[SiteEdit] = []
+    errors: dict[int, dict[str, str]] = {}
+    for site in sites:
+        sid = site.se_site_id
+        errs: dict[str, str] = {}
+        raw_name = form.get(f"name_{sid}")
+        name = None
+        if raw_name is not None:
+            try:
+                name = validate_name(str(raw_name))
+            except ValueError:
+                errs["name"] = NAME_ERROR
+        raw_basis = form.get(f"basis_{sid}")
+        basis = site.income_basis if raw_basis is None else str(raw_basis)
+        if basis not in BASES:
+            errs["basis"] = BASIS_ERROR
+        raw_tariff = form.get(f"tariff_{sid}")
+        tariff = site.tariff_ils_per_kwh
+        if raw_tariff is not None:
+            try:  # any Unicode whitespace, NBSP included, as pasted from a bill
+                tariff = parse_tariff("".join(str(raw_tariff).split()))
+            except ValueError:
+                errs["tariff"] = TARIFF_ERROR
+        if errs:
+            errors[sid] = errs
+        else:
+            edits.append(SiteEdit(sid, name, basis, tariff, str(sid) in ticked))
+    return edits, errors
+
+
 def apply_edits(
     session: Session,
     owner_id: int,
@@ -74,8 +120,9 @@ def apply_edits(
         money_changed = (
             site.tariff_ils_per_kwh != edit.tariff or site.income_basis != edit.basis
         )
-        site.label_he = edit.name
-        site.card_name = edit.name
+        if edit.name is not None:
+            site.label_he = edit.name
+            site.card_name = edit.name
         site.income_basis = edit.basis
         site.tariff_ils_per_kwh = edit.tariff
         if site.monitored != edit.monitored:

@@ -1,5 +1,6 @@
 import re
 from datetime import timedelta
+from decimal import Decimal
 
 import httpx
 import pytest
@@ -12,6 +13,7 @@ from solya.db import session_scope
 from solya.models import ConnectRequest, Invite, Owner, Payment, Site
 from solya.pricing import ESTIMATE_LABEL, VAT_NOTE
 from solya.services import onboarding, payments
+from solya.services.site_settings import TARIFF_ERROR
 from solya.web.journey import PRE_COOKIE
 from solya.web.security import SESSION_COOKIE
 
@@ -345,7 +347,7 @@ FARM_ID = 3033498  # portal peakPower 65.52, no override: 49.97 + 15.52 = 65.49 
 CODE = "SECRET-AUTH-CODE-123"
 CONNECTED = "המערכת חוברה בהצלחה. אפשר לחזור לטלגרם."
 PICK_ONE = "יש לבחור לפחות מערכת אחת"
-VIA_BOT = "השינויים נעשים עכשיו דרך סול בטלגרם"
+VIA_BOT = "לשינויים שלחו לסול בטלגרם /settings"
 STUB = "טרם שולם. ספק הסליקה טרם נבחר, ולא בוצע חיוב ולא הופעל מנוי."
 
 
@@ -413,7 +415,7 @@ def test_full_journey_to_ready(tc, container, load_fixture):
     _mock_se(load_fixture("solaredge/site_farm.json"))
     r = tc.get("/oauth/callback", params={"code": CODE, "site_id": FARM_ID, "state": nonce})
     assert r.status_code == 303
-    assert r.headers["location"] == "/sites"
+    assert r.headers["location"] == f"/sites?connected={FARM_ID}"
     assert _owner(container, owner_id).subscription_status == "connected"
 
     r = tc.get("/sites")
@@ -721,9 +723,183 @@ def test_sites_error_shows_submitted_selection(tc, container):
     _add_site(container, owner_id, 111111)
     _add_site(container, owner_id, 111112)
     page = tc.get("/sites").text
-    assert page.count(" checked") == 2  # the stored flags on a plain GET
+    ticked = re.compile(r'name="site" value="\d+" checked')
+    assert len(ticked.findall(page)) == 2  # the stored flags on a plain GET
     r = tc.post("/sites", data={"csrf": _csrf(page)})
     assert r.status_code == 400 and PICK_ONE in r.text
     assert "111111" in r.text and "111112" in r.text
-    assert "checked" not in r.text
+    assert not ticked.findall(r.text)
     assert _monitored(container) == {111111: True, 111112: True}
+
+
+# --- several systems and settings on the picker (Task 5) ---------------------------------
+
+HOME_ID = 4552265
+BANNER_TAIL = "חוברה. יש לך עוד מערכת?"
+ANOTHER = "חיבור מערכת נוספת"
+ANOTHER_HINT = "בחלון של SolarEdge בחרו את המערכת שעוד לא חוברה."
+DONE = "סיימתי, המשך"
+ALREADY_TAIL = "כבר מחוברת. בחלון של SolarEdge בחרו מערכת אחרת."
+NEW_FOOTNOTE = ("כל מערכת מאשרים בנפרד ב-SolarEdge. אם יש לך כמה מערכות, אחרי הראשונה "
+                "נחזור לכאן ותוכל/י לחבר את הבאה.")
+
+
+def _callback(tc, container, owner_id, site_json):
+    _mock_se(site_json)
+    with session_scope(container.session_factory) as s:
+        token = onboarding.create_connect_request(
+            s, owner_id, container.clock.now(), container.settings).rsplit("/", 1)[1]
+        nonce = s.get(ConnectRequest, token).nonce
+    return tc.get("/oauth/callback",
+                  params={"code": CODE, "site_id": site_json["siteId"], "state": nonce})
+
+
+def _site(container, site_id) -> Site:
+    with session_scope(container.session_factory) as s:
+        site = s.get(Site, site_id)
+        s.expunge(site)
+        return site
+
+
+@respx.mock
+def test_two_connects_one_session_show_banner_each_time(tc, container, load_fixture):
+    owner_id = _web_owner(tc, container)
+    r = _callback(tc, container, owner_id, load_fixture("solaredge/site_farm.json"))
+    assert (r.status_code, r.headers["location"]) == (303, f"/sites?connected={FARM_ID}")
+    page = tc.get(r.headers["location"]).text
+    assert f"המערכת <bdi>אורן סופר</bdi> {BANNER_TAIL}" in page
+    assert ANOTHER in page and ANOTHER_HINT in page and DONE in page
+    assert 'action="/connect-site"' in page
+
+    r = _callback(tc, container, owner_id, load_fixture("solaredge/site_home.json"))
+    assert (r.status_code, r.headers["location"]) == (303, f"/sites?connected={HOME_ID}")
+    page = tc.get(r.headers["location"]).text
+    assert f"המערכת <bdi>IL 360</bdi> {BANNER_TAIL}" in page
+    assert str(FARM_ID) in page and str(HOME_ID) in page
+    assert f'name="name_{FARM_ID}" value="אורן סופר"' in page
+    assert f'name="name_{HOME_ID}" value="IL 360"' in page
+    # the plain page has no banner
+    assert BANNER_TAIL not in tc.get("/sites").text
+    # the banner's connect button starts the next connect
+    r = tc.post("/connect-site", data={"csrf": _csrf(page)})
+    assert r.status_code == 303 and r.headers["location"].startswith("/connect/")
+
+
+@respx.mock
+def test_reapprove_same_site_shows_already(tc, container, load_fixture):
+    owner_id = _web_owner(tc, container)
+    farm = load_fixture("solaredge/site_farm.json")
+    _callback(tc, container, owner_id, farm)
+    r = _callback(tc, container, owner_id, farm)
+    assert (r.status_code, r.headers["location"]) == (303, f"/sites?already={FARM_ID}")
+    page = tc.get(r.headers["location"]).text
+    assert "כבר מחוברת" in page
+    assert f"המערכת <bdi>אורן סופר</bdi> {ALREADY_TAIL}" in page
+    assert BANNER_TAIL not in page
+
+
+def test_banner_ignores_foreign_site_id(tc, app, container):
+    mine = _web_owner(tc, container)
+    with TestClient(app, base_url=HTTPS, follow_redirects=False) as other:
+        theirs = _web_owner(other, container)
+    _add_site(container, mine, 111111, name="הבית שלי")
+    _add_site(container, theirs, 222222, name="של מישהו אחר")
+    for query in ("connected=222222", "already=222222", "connected=abc", "connected=999",
+                  "connected=99999999999999999999999", "connected=-1", "connected=１"):
+        r = tc.get(f"/sites?{query}")
+        assert r.status_code == 200, query
+        assert BANNER_TAIL not in r.text and "כבר מחוברת" not in r.text, query
+        assert "של מישהו אחר" not in r.text, query
+    assert BANNER_TAIL in tc.get("/sites?connected=111111").text
+
+
+def test_sites_post_saves_settings(tc, app, container):
+    owner_id = _web_owner(tc, container)
+    with TestClient(app, base_url=HTTPS, follow_redirects=False) as other:
+        theirs = _web_owner(other, container)
+    _add_site(container, owner_id, 111111, name="IL 360 - בית")
+    _add_site(container, theirs, 222222, name="של מישהו אחר")
+    page = tc.get("/sites").text
+    assert 'name="name_111111" value="IL 360"' in page
+    assert 'name="basis_111111"' in page and 'name="tariff_111111"' in page
+    assert "לא יודע/ת? אפשר להשאיר ריק." in page
+    r = tc.post("/sites", data={
+        "csrf": _csrf(page), "site": ["111111"],
+        "name_111111": " הבית שלי ", "basis_111111": "export", "tariff_111111": "0,48",
+        # a forged id of another owner's site is ignored silently
+        "name_222222": "נפרץ", "basis_222222": "export", "tariff_222222": "1",
+    })
+    assert (r.status_code, r.headers["location"]) == (303, "/price")
+    site = _site(container, 111111)
+    assert site.tariff_ils_per_kwh == Decimal("0.48")
+    assert (site.label_he, site.card_name, site.income_basis) == ("הבית שלי", "הבית שלי", "export")
+    other_site = _site(container, 222222)
+    assert other_site.label_he is None and other_site.tariff_ils_per_kwh is None
+    assert other_site.card_name is None
+    # the stored values are shown next time
+    page = tc.get("/sites").text
+    assert 'name="name_111111" value="הבית שלי"' in page
+    assert 'name="tariff_111111" value="0.48"' in page
+
+
+def test_sites_post_bad_tariff_rerenders(tc, container):
+    owner_id = _web_owner(tc, container)
+    _add_site(container, owner_id, 111111)
+    csrf = _csrf(tc.get("/sites").text)
+    r = tc.post("/sites", data={"csrf": csrf, "site": "111111", "name_111111": "שם חדש",
+                                "basis_111111": "export", "tariff_111111": "שקל"})
+    assert r.status_code == 400
+    assert TARIFF_ERROR in r.text
+    assert 'name="tariff_111111" value="שקל"' in r.text
+    assert 'name="name_111111" value="שם חדש"' in r.text
+    site = _site(container, 111111)
+    assert site.tariff_ils_per_kwh is None and site.label_he is None
+    assert site.card_name is None and site.income_basis == "production"
+
+
+def test_price_lists_per_site(tc, container):
+    owner_id = _web_owner(tc, container)
+    _add_site(container, owner_id, 111111, name="בית", kw=26.55)
+    _add_site(container, owner_id, 111112, name="משק", kw=65.52)
+    _add_site(container, owner_id, 111113, name="לא במעקב", kw=10, monitored=False)
+    text = tc.get("/price").text
+    total_at = text.index('class="total"')
+    for name, amount in (("בית", "49.97 ₪"), ("משק", "65.49 ₪")):
+        assert -1 < text.index(name) < total_at
+        assert -1 < text.index(amount) < total_at
+    assert "לא במעקב" not in text
+
+
+def test_connect_page_lists_connected_and_new_footnote(tc, container):
+    owner_id = _web_owner(tc, container)
+    page = tc.get("/connect-site").text
+    assert NEW_FOOTNOTE in page and "מחוברות:" not in page
+    assert "אחרי האישור בוחרים אילו מערכות לעקוב." not in page
+    _add_site(container, owner_id, 111111, name="בית")
+    _add_site(container, owner_id, 111112, name="IL 360 - אורן סופר")
+    page = tc.get("/connect-site").text
+    assert NEW_FOOTNOTE in page and "מחוברות:" in page
+    assert "<bdi>בית</bdi>" in page and "<bdi>IL 360</bdi>" in page
+
+
+@respx.mock
+def test_linked_owner_with_session_lands_on_settings(tc, container, load_fixture):
+    owner_id = _web_owner(tc, container)
+    farm = load_fixture("solaredge/site_farm.json")
+    home = load_fixture("solaredge/site_home.json")
+    assert _callback(tc, container, owner_id, farm).headers["location"].startswith("/sites?")
+    _link(container, owner_id)
+    r = _callback(tc, container, owner_id, home)
+    assert (r.status_code, r.headers["location"]) == (303, f"/settings?connected={HOME_ID}")
+    r = _callback(tc, container, owner_id, home)
+    assert (r.status_code, r.headers["location"]) == (303, f"/settings?already={HOME_ID}")
+    # no session at all (the Telegram /connect link): the plain page
+    session = tc.cookies.get(SESSION_COOKIE)
+    tc.cookies.clear()
+    r = _callback(tc, container, owner_id, home)
+    assert r.status_code == 200 and CONNECTED in r.text
+    # someone else's session is not this owner's: the plain page
+    _web_owner(tc, container)
+    assert tc.cookies.get(SESSION_COOKIE) != session
+    r = _callback(tc, container, owner_id, home)
+    assert r.status_code == 200 and CONNECTED in r.text

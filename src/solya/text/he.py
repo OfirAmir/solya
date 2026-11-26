@@ -193,8 +193,12 @@ def sites_monitored(n: int) -> str:
     return f"המערכות שלך במעקב: {n}"
 
 
-def site_connected(portal_name: str) -> str:
-    return rtl_text(f"המערכת {portal_name} חוברה בהצלחה.")
+def site_connected(name: str) -> str:
+    return rtl_text(f"המערכת {name} חוברה בהצלחה. יש לך עוד מערכת? שלחו /connect.")
+
+
+def site_already_connected(name: str) -> str:
+    return rtl_text(f"המערכת {name} כבר מחוברת. בחלון של SolarEdge בחרו מערכת אחרת.")
 
 
 def reauth_link(name: str, label: str, url: str, local_dt: datetime) -> str:

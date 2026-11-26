@@ -512,7 +512,8 @@ async def test_on_site_connected_welcomes(h):
     await h.reporter.on_site_connected(site, is_first=True)
 
     texts = [m.text for m in h.channel.sent]
-    assert texts == [rtl_text("המערכת אורן סופר חוברה בהצלחה."), rtl_text(WELCOME_1)]
+    connected = rtl_text("המערכת משק חוברה בהצלחה. יש לך עוד מערכת? שלחו /connect.")
+    assert texts == [connected, rtl_text(WELCOME_1)]
     assert f"{RLM}24/7" in texts[1]
     assert [seconds for seconds, _ in h.delayed] == [60]
     await h.delayed[0][1]()
@@ -521,7 +522,22 @@ async def test_on_site_connected_welcomes(h):
     h.clock.advance(timedelta(days=1))  # a later reconnect of the same site
     await h.reporter.on_site_connected(site, is_first=False)
     assert len(h.channel.sent) == 4 and len(h.delayed) == 1
-    assert h.channel.sent[-1].text == rtl_text("המערכת אורן סופר חוברה בהצלחה.")
+    assert h.channel.sent[-1].text == connected
+
+
+async def test_on_site_connected_already_message(h):
+    await h.reporter.on_site_connected(HOME, is_first=False, already=True)
+    (msg,) = h.channel.sent
+    assert msg.text == rtl_text("המערכת בית כבר מחוברת. בחלון של SolarEdge בחרו מערכת אחרת.")
+    assert "\u200e" not in msg.text
+    assert not h.delayed
+
+
+async def test_on_site_connected_command_has_no_direction_marks(h):
+    await h.reporter.on_site_connected(HOME, is_first=False)
+    (msg,) = h.channel.sent
+    assert msg.text.endswith("שלחו /connect.")
+    assert "\u200f/connect" not in msg.text and "\u200e" not in msg.text
 
 
 async def test_on_site_connected_replans_owner(h):

@@ -127,6 +127,7 @@ def all_variants():
         he.comm_restored("אורן", "משק", AT_1710),
         he.connect_link("https://example.com/c?x=1"),
         he.site_connected("Portal 1"),
+        he.site_already_connected("Portal 1"),
         he.reauth_link("אורן", "משק", "https://example.com/r", AT_1710),
         he.WELCOME_1, he.WELCOME_2, he.NOT_INVITED, he.INVITE_OK, he.HELP, he.NO_DATA_YET,
     ]
@@ -150,7 +151,13 @@ def test_every_line_starts_hebrew():
 
 def test_site_connected_portal_name_latin_gets_no_rlm_issue():
     # "Portal 1" follows Hebrew with a space, so it is RLM-prefixed per R2.
-    assert he.site_connected("Portal 1") == f"המערכת {RLM}Portal {RLM}1 חוברה בהצלחה."
+    assert he.site_connected("Portal 1") == (
+        f"המערכת {RLM}Portal {RLM}1 חוברה בהצלחה. יש לך עוד מערכת? שלחו /connect.")
+
+
+def test_site_already_connected_exact():
+    assert he.site_already_connected("משק") == (
+        f"המערכת משק כבר מחוברת. בחלון של {RLM}SolarEdge בחרו מערכת אחרת.")
 
 
 def test_fault_alert_fan_exact():

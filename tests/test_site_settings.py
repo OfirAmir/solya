@@ -163,3 +163,81 @@ def test_effective_label_falls_back_to_card_name():
     site = Site(se_site_id=1, owner_id=1, portal_name="Portal", card_name="IL 360")
     assert effective_label(site, 2) == "IL 360"
     assert effective_label(site, 1) == "המערכת"
+
+
+# --- parse_site_form (shared by the picker and the settings page) ----------------------
+
+from starlette.datastructures import FormData  # noqa: E402
+
+
+def _sites():
+    return [
+        Site(se_site_id=1, owner_id=1, portal_name="IL 360 - בית", tz="Asia/Jerusalem",
+             income_basis="export", tariff_ils_per_kwh=Decimal("0.48"), monitored=True),
+        Site(se_site_id=2, owner_id=1, portal_name="משק", label_he="המשק", card_name="משק",
+             tz="Asia/Jerusalem", income_basis="production", monitored=True),
+    ]
+
+
+def test_display_name():
+    one, two = _sites()
+    assert ss.display_name(one) == "IL 360"
+    assert ss.display_name(two) == "המשק"
+
+
+def test_parse_site_form_reads_fields_and_ignores_foreign_ids():
+    form = FormData([
+        ("site", "1"), ("site", "99"),
+        ("name_1", " בית "), ("basis_1", "production"), ("tariff_1", "0.5 ₪"),
+        ("name_2", "משק"), ("basis_2", "export"), ("tariff_2", ""),
+        ("name_99", "x"), ("basis_99", "export"), ("tariff_99", "1"),
+    ])
+    edits, errors = ss.parse_site_form(form, _sites())
+    assert errors == {}
+    assert edits == [
+        ss.SiteEdit(1, "בית", "production", Decimal("0.5"), True),
+        ss.SiteEdit(2, "משק", "export", None, False),
+    ]
+
+
+@pytest.mark.parametrize("raw", ["0,48", " 0.48 ", "₪0.48", "0.48 ₪", "0.48 ₪",
+                                 " 0,48 ", "₪ 0.48"])
+def test_parse_site_form_tariff_whitespace(raw):
+    form = FormData([("site", "1"), ("name_1", "בית"), ("basis_1", "export"), ("tariff_1", raw)])
+    edits, errors = ss.parse_site_form(form, _sites()[:1])
+    assert errors == {} and edits[0].tariff == Decimal("0.48")
+
+
+def test_parse_site_form_errors_per_field():
+    form = FormData([
+        ("name_1", ""), ("basis_1", "both"), ("tariff_1", "9"),
+        ("name_2", "משק"), ("basis_2", "export"), ("tariff_2", "abc"),
+    ])
+    edits, errors = ss.parse_site_form(form, _sites())
+    assert errors == {
+        1: {"name": ss.NAME_ERROR, "basis": ss.BASIS_ERROR, "tariff": ss.TARIFF_ERROR},
+        2: {"tariff": ss.TARIFF_ERROR},
+    }
+    assert ss.BASIS_ERROR == "יש לבחור איך מקבלים תשלום"
+    assert edits == []
+
+
+def test_parse_site_form_absent_fields_keep_stored_values():
+    """A form without the per-site fields (an older page) changes only monitoring."""
+    edits, errors = ss.parse_site_form(FormData([("site", "2")]), _sites())
+    assert errors == {}
+    assert edits == [
+        ss.SiteEdit(1, None, "export", Decimal("0.48"), False),
+        ss.SiteEdit(2, None, "production", None, True),
+    ]
+
+
+def test_apply_edits_without_name_keeps_names(db):
+    with db() as s:
+        s.add(Owner(id=1, display_name="o", created_at=NOW))
+        s.add(Site(se_site_id=1, owner_id=1, portal_name="p", card_name="c", tz="Asia/Jerusalem",
+                   created_at=NOW))
+        s.flush()
+        ss.apply_edits(s, 1, [ss.SiteEdit(1, None, "export", None, True)], lambda _: TODAY)
+        site = s.get(Site, 1)
+        assert (site.label_he, site.card_name, site.income_basis) == (None, "c", "export")

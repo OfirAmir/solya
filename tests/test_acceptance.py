@@ -754,7 +754,7 @@ async def test_a11_web_journey_end_to_end(settings, load_fixture, cards, tmp_pat
                     nonce = s.get(ConnectRequest, token).nonce
                 r = tc.get("/oauth/callback", params={"code": "AUTH-CODE", "site_id": HOME,
                                                       "state": nonce})
-                assert r.status_code == 303 and r.headers["location"] == "/sites"
+                assert r.status_code == 303 and r.headers["location"] == f"/sites?connected={HOME}"
                 r = tc.post("/sites", data={"site": str(HOME),
                                             "csrf": csrf_re.search(tc.get("/sites").text).group(1)})
                 assert r.status_code == 303 and r.headers["location"] == "/price"

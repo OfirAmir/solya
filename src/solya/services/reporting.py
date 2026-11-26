@@ -36,6 +36,7 @@ from solya.rules.faults import (
 from solya.rules.ray import RayCalculator, weighted_ray
 from solya.scheduler import is_daylight
 from solya.services.onboarding import create_connect_request
+from solya.services.site_settings import display_name
 from solya.solaredge.client import SolarEdgeClient
 from solya.solaredge.errors import AuthExpired, BudgetExceeded
 from solya.solaredge.oauth import TokenManager
@@ -607,13 +608,15 @@ class Reporter:
                 )
             )
 
-    async def on_site_connected(self, site: Site | int, is_first: bool) -> None:
+    async def on_site_connected(self, site: Site | int, is_first: bool,
+                                already: bool = False) -> None:
+        """``already``: the owner re-approved a site they already had."""
         site_id = _site_id(site)
         now = self._clock.now()
         with session_scope(self._sf) as s:
             row = s.get(Site, site_id)
             owner = s.get(Owner, row.owner_id)
-            chat, owner_id, portal_name = owner_chat(owner), owner.id, row.portal_name
+            chat, owner_id, name = owner_chat(owner), owner.id, display_name(row)
             unlinked = owner.telegram_chat_id is None
         if self.replan_owner is not None:
             try:
@@ -627,7 +630,9 @@ class Reporter:
                 log.info("connect messages for site %s skipped: owner %s inactive", site_id, owner_id)
             return
         await self._send(
-            OutboundMessage(chat, "welcome", he.site_connected(portal_name), None,
+            OutboundMessage(chat, "welcome",
+                            he.site_already_connected(name) if already else he.site_connected(name),
+                            None,
                             f"connected:{site_id}:{now.isoformat()}")
         )
         if not is_first:
