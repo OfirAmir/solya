@@ -64,9 +64,11 @@ on it with deploy/ec2/setup.sh over SSH.
   --admin-user NAME     VM login user            (default: azureuser;      env SOLYA_AZ_ADMIN_USER)
   --ssh-key FILE.pub    public key for the VM    (default: ~/.ssh/id_ed25519.pub if present,
                                                   else az --generate-ssh-keys; env SOLYA_AZ_SSH_KEY)
-  --ssh-source IP       IPv4 (or CIDR) allowed to SSH in (default: your current public IPv4
-                        from api.ipify.org; env SOLYA_AZ_SSH_SOURCE). Re-run with it when
-                        your IP changes: the SSH rule is updated in place.
+  --ssh-source LIST     comma-separated IPv4 addresses or CIDRs (/24 to /32) allowed to SSH
+                        in (default: every public IPv4 api.ipify.org reports over a few
+                        tries, which covers dual-WAN and load-balanced connections; env
+                        SOLYA_AZ_SSH_SOURCE). The SSH rule is set to exactly this list on
+                        every run.
   --dns-label LABEL     DNS label (default: solya-<6 random chars>, saved in $STATE_FILE;
                         env SOLYA_AZ_DNS_LABEL)
   --dry-run             print the az and ssh commands; change nothing (read-only az queries
@@ -170,22 +172,49 @@ check_sku() {
     info "available"
 }
 
+SSH_SOURCES=()   # normalised CIDRs for the SSH rule
+
 resolve_ssh_source() {
+    local raw=() item ip prefix seen=" "
     if [[ -z "$SSH_SOURCE" ]]; then
-        SSH_SOURCE="$(curl -fsS --max-time 10 https://api.ipify.org 2>/dev/null || true)"
-        if ! valid_ipv4 "$SSH_SOURCE"; then
+        # A connection with several exits (dual WAN, load balancing) shows a different
+        # public IP per request, so ask a few times and allow every address seen.
+        local i got
+        for i in 1 2 3 4 5 6; do
+            got="$(curl -fsS --max-time 10 https://api.ipify.org 2>/dev/null || true)"
+            valid_ipv4 "$got" && raw+=("$got")
+            (( i < 6 )) && sleep 1
+        done
+        if (( ${#raw[@]} == 0 )); then
             if (( DRY_RUN )); then
                 warn "could not detect your public IPv4 (api.ipify.org); the plan shows a placeholder"
-                SSH_SOURCE="203.0.113.10"
+                raw=(203.0.113.10)
             else
-                die "could not detect your public IPv4 via api.ipify.org. Pass it with --ssh-source A.B.C.D"
+                die "could not detect your public IPv4 via api.ipify.org. Pass it with --ssh-source A.B.C.D[,E.F.G.H]"
             fi
         fi
-        info "SSH allowed from your current public IP: $SSH_SOURCE"
+    else
+        IFS=',' read -r -a raw <<< "${SSH_SOURCE// /}"
     fi
-    local ip="${SSH_SOURCE%/*}"
-    valid_ipv4 "$ip" || die "--ssh-source '$SSH_SOURCE' is not an IPv4 address or CIDR"
-    [[ "$SSH_SOURCE" == */* ]] || SSH_SOURCE="$SSH_SOURCE/32"
+    SSH_SOURCES=()
+    for item in "${raw[@]}"; do
+        [[ -n "$item" ]] || continue
+        ip="${item%/*}"
+        prefix=32
+        [[ "$item" == */* ]] && prefix="${item#*/}"
+        valid_ipv4 "$ip" || die "--ssh-source '$item' is not an IPv4 address or CIDR"
+        if ! [[ "$prefix" =~ ^[0-9]+$ ]] || (( prefix < 24 || prefix > 32 )); then
+            die "--ssh-source '$item': the prefix must be /24 to /32 (SSH is never opened wider)"
+        fi
+        item="$ip/$prefix"
+        [[ "$seen" == *" $item "* ]] && continue
+        seen+="$item "
+        SSH_SOURCES+=("$item")
+    done
+    (( ${#SSH_SOURCES[@]} > 0 )) || die "--ssh-source is empty"
+    SSH_SOURCE="$(IFS=','; echo "${SSH_SOURCES[*]}")"
+    SSH_SOURCE="${SSH_SOURCE//,/, }"
+    info "SSH allowed from: $SSH_SOURCE"
 }
 
 # The DNS label: --dns-label/env, else the one on an existing public IP, else the state
@@ -254,20 +283,37 @@ ensure_public_ip() {
 }
 
 # Create the rule, or update an existing one in place (so a changed --ssh-source applies).
-ensure_rule() {  # name priority port source
-    local name="$1" prio="$2" port="$3" src="$4" cur
-    if cur="$(azq network nsg rule show -g "$RG" --nsg-name "$VM-nsg" -n "$name" \
-            --query "{one: sourceAddressPrefix, many: sourceAddressPrefixes}" -o json)"; then
-        if grep -qF "\"$src\"" <<< "$cur"; then
-            info "rule $name: present (TCP $port from $src)"
+# Sorted, /32-normalised form of a list of address prefixes, for comparing rule sources.
+norm_prefixes() {
+    local p
+    for p in "$@"; do
+        [[ -n "$p" && "$p" != "None" ]] || continue
+        if valid_ipv4 "$p"; then echo "$p/32"; else echo "$p"; fi
+    done | sort -u | tr '\n' ' '
+}
+
+# Create the rule, or update an existing one in place so its sources are exactly the
+# given list (a changed --ssh-source, or addresses added by hand, are reconciled).
+ensure_rule() {  # name priority port source...
+    local name="$1" prio="$2" port="$3"; shift 3
+    local src=("$@") one many cur want
+    if one="$(azq network nsg rule show -g "$RG" --nsg-name "$VM-nsg" -n "$name" \
+            --query sourceAddressPrefix -o tsv)"; then
+        many="$(azq network nsg rule show -g "$RG" --nsg-name "$VM-nsg" -n "$name" \
+            --query 'sourceAddressPrefixes[]' -o tsv || true)"
+        # shellcheck disable=SC2086 # word-split the tsv lists on purpose
+        cur="$(norm_prefixes $one $many)"
+        want="$(norm_prefixes "${src[@]}")"
+        if [[ "$cur" == "$want" ]]; then
+            info "rule $name: present (TCP $port from ${want% })"
             return
         fi
         run az network nsg rule update -g "$RG" --nsg-name "$VM-nsg" -n "$name" \
-            --source-address-prefixes "$src" -o none
+            --source-address-prefixes "${src[@]}" -o none
     else
         run az network nsg rule create -g "$RG" --nsg-name "$VM-nsg" -n "$name" \
             --priority "$prio" --direction Inbound --access Allow --protocol Tcp \
-            --source-address-prefixes "$src" --source-port-ranges '*' \
+            --source-address-prefixes "${src[@]}" --source-port-ranges '*' \
             --destination-address-prefixes '*' --destination-port-ranges "$port" -o none
     fi
 }
@@ -281,7 +327,7 @@ ensure_nsg() {
     fi
     ensure_rule allow-http  1010 80  Internet
     ensure_rule allow-https 1020 443 Internet
-    ensure_rule allow-ssh   1030 22  "$SSH_SOURCE"
+    ensure_rule allow-ssh   1030 22  "${SSH_SOURCES[@]}"
     # Port 8000 (uvicorn) is never opened: Caddy reaches it over the Docker network only.
     local open8000
     open8000="$(azq network nsg rule list -g "$RG" --nsg-name "$VM-nsg" \
