@@ -1,6 +1,7 @@
 """Invite-only onboarding and OAuth connect-request bookkeeping."""
 from __future__ import annotations
 
+import hashlib
 import logging
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -12,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from solya.config import Settings
 from solya.rules.faults import ack_owner_faults
-from solya.models import ConnectRequest, Invite, Owner, Site
+from solya.models import ConnectRequest, Invite, Owner, SettingsLink, Site
 from solya.services.site_settings import default_basis, short_name
 from solya.solaredge.models import SiteInfo
 
@@ -169,6 +170,49 @@ def create_connect_request(
     )
     session.flush()
     return f"{str(settings.public_base_url).rstrip('/')}/connect/{token}"
+
+
+SETTINGS_LINK_TTL = timedelta(minutes=15)
+
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def create_settings_link(
+    session: Session, owner_id: int, now: datetime, settings: Settings
+) -> str:
+    """A fresh single-use settings link (15 minutes); only its hash is stored."""
+    token = secrets.token_urlsafe(24)
+    session.add(SettingsLink(token_hash=_token_hash(token), owner_id=owner_id, created_at=now))
+    session.flush()
+    return f"{str(settings.public_base_url).rstrip('/')}/settings/{token}"
+
+
+def resolve_settings_link(session: Session, token: str, now: datetime) -> SettingsLink | None:
+    """The link if it is unused and less than 15 minutes old."""
+    link = session.get(SettingsLink, _token_hash(token))
+    if link is None or link.used_at is not None or now - link.created_at >= SETTINGS_LINK_TTL:
+        return None
+    return link
+
+
+def use_settings_link(session: Session, token: str, now: datetime) -> int | None:
+    """Resolve and mark the link used in one conditional update, so two concurrent POSTs
+    cannot both claim it. Returns the owner id, or None when the link is not usable."""
+    link = resolve_settings_link(session, token, now)
+    if link is None:
+        return None
+    claimed = session.execute(
+        update(SettingsLink)
+        .where(SettingsLink.token_hash == link.token_hash, SettingsLink.used_at.is_(None))
+        .values(used_at=now)
+        .execution_options(synchronize_session=False)
+    ).rowcount
+    if not claimed:
+        return None
+    session.expire(link)
+    return link.owner_id
 
 
 def _usable(req: ConnectRequest | None, now: datetime, ttl_minutes: int) -> ConnectRequest | None:
