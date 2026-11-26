@@ -1,6 +1,6 @@
 # Report parity, several systems, owner settings: design
 
-Date: 26 Nov 2026. Status: draft for approval. This is PR 1 of 2. PR 2 is RAY v1 (outline at the end).
+Date: 26 Nov 2026. Status: for approval. A builder check was run; answers marked *(my call)* settle its questions. This is PR 1 of 2. PR 2 is RAY v1 (outline at the end).
 
 ## Why
 
@@ -62,13 +62,19 @@ Fields per site, shown on the sign-up picker (`/sites`) and on the new settings 
 
 - On the sign-up picker the tariff is **optional**: "לא יודע/ת" leaves it empty. The owner can continue.
 - Saving a tariff or basis **recomputes `income_ils`** for the site's stored `daily_metrics` rows of the current calendar month, so "החודש" stays consistent. Older rows are untouched.
-- Name defaulting happens when the site is first registered (`onboarding.register_site`), only if `label_he`/`card_name` are empty. Admin values set by `sites set` are never overwritten by defaults.
+- Name defaulting happens when the site is first registered (`onboarding.register_site`), only if `card_name` is empty. The default fills **`card_name` only**; `label_he` stays empty until the owner saves a name. *(My call.)* So a one-system owner still reads "המערכת" in the text, and existing tests keep their meaning. For multi-site owners, `effective_label` falls back to `card_name` before `portal_name`.
+- The "שם" field shows `label_he`, else `card_name`, else the shortened portal name. Saving it writes **both** `label_he` and `card_name`. The owner's save wins over an earlier admin value. *(My call: the owner is the authority on their own system's name.)* Defaults never overwrite anything.
+- With mixed tariffs (some sites priced, some not), the total shows kWh only, on the card and in the text, as today. The ₪ total and "לפני מע״מ" appear only when every site in the report has income. *(My call: a partial ₪ sum next to a full kWh sum looks wrong.)* Per-site ₪ still shows for the priced sites.
 - `solya sites set` stays as an admin override.
+- **Sites that already exist at deploy (Oren's farm):** *(my call)*
+  - Name default: applied once at startup to sites whose `card_name` is empty.
+  - Income basis: left as is. The current value can't be told apart from the column default, so we don't guess. The owner confirms it on the settings page when entering the tariff; the page shows the current value.
+  - Month backfill: runs for any site with missing days in the current month, both after register and once at startup (see §5). So it self-heals for existing sites without an admin step.
 
 ### 2. Settings page after Telegram is linked
 
 - New bot command `/settings` ("הגדרות"). Sol replies with a link `https://<host>/settings/<token>`, valid 15 minutes, single use. The token is stored hashed in a new table `settings_links` (`token_hash`, `owner_id`, `created_at`, `used_at`), following the `ConnectRequest` pattern.
-- Opening the link marks it used and starts a normal signed web session for that owner (same cookie and CSRF as sign-up), then redirects to `/settings`.
+- Opening the link (GET) shows a confirm page with one button "פתיחת ההגדרות". Only the CSRF-checked POST marks the token used and starts the web session, then redirects to `/settings`. *(My call: same pattern as `/join/<invite>`. No sign-in on GET, so Telegram's link preview can't use up the token and a shared link can't sign someone in silently.)* A session started this way lasts 24 hours, not the sign-up's 30 days. *(My call.)*
 - `/settings` shows every site of the owner with the fields above, the price per site and the monthly total, plus "חיבור מערכת נוספת" (goes to `/connect-site`).
 - Saving changes to `monitored` that change the total: admins get a notice in `ADMIN_CHAT_IDS` with the owner, the change and the new monthly total. No billing action (payments are a stub).
 - `CHANGES_VIA_BOT` on the locked `/sites` page becomes "לשינויים שלחו לסול בטלגרם /settings", which is now true.
@@ -80,6 +86,10 @@ Fields per site, shown on the sign-up picker (`/sites`) and on the new settings 
 - `connect.html`: fix the misleading footnote ("אחרי האישור בוחרים אילו מערכות לעקוב"). New copy: "כל מערכת מאשרים בנפרד ב-SolarEdge. אם יש לך כמה מערכות, אחרי הראשונה נחזור לכאן ותוכל/י לחבר את הבאה." List already-connected systems by name.
 - After a successful callback, `/sites` shows a banner: "המערכת {name} חוברה. יש לך עוד מערכת?" with a primary button "חיבור מערכת נוספת" (POST `/connect-site` with CSRF, straight to SolarEdge) and a secondary button "סיימתי, המשך". The hint under the primary button: "בחלון של SolarEdge בחרו את המערכת שעוד לא חוברה."
 - Re-approving a site the owner already has: the callback detects `previous_owner == requesting owner` and the banner says "המערכת {name} כבר מחוברת. בחלון של SolarEdge בחרו מערכת אחרת." In Telegram, Sol sends the same sentence.
+- **Where the owner lands after a callback** *(my call)*:
+  - Web sign-up not yet linked to Telegram: `/sites` with the banner, as above.
+  - Linked owner with a live web session (came from `/settings`): `/settings` with the same banner.
+  - Linked owner without a web session (came from the Telegram `/connect` link): the plain "אפשר לחזור לטלגרם" page, and the banner text arrives in Telegram from Sol instead.
 - `/price` lists the price per site above the total.
 - In Telegram, after each connect: "המערכת {name} חוברה בהצלחה. יש לך עוד מערכת? שלחו /connect."
 
@@ -110,8 +120,8 @@ Delivery (`messaging/telegram.py`): when there is an image and the text is at mo
 ### 5. Month-to-date backfill
 
 - New client method `get_energy_daily(site_id, from, to)` for `GET /sites/{id}/energy?resolution=DAY` (1 credit), and `get_meter_export_daily(site_id, from, to)` for `GET /sites/{id}/meters/telemetry?resolution=DAY` (1 credit, export energy per day; 404 means no meter).
-- When a site is first registered, and only then, a background job fetches the 1st of the current month to yesterday (local) and writes `daily_metrics` rows for days that have none: `production_wh`, `export_wh` (null if no meter), `income_ils` computed from the site's tariff if set, `comm_state="backfill"`, `as_of` = fetch time.
-- On the 1st and 2nd of a month the window is short or empty; the job does nothing when empty.
+- After a site is registered, and once at every startup for every active site with missing days this month, a background job fetches the 1st of the current month to yesterday (local) and writes `daily_metrics` rows for days that have none: `production_wh`, `export_wh` (null if no meter), `income_ils` computed from the site's tariff if set, `comm_state="backfill"`, `as_of` = fetch time.
+- On the 1st of a month the window is empty and the job does nothing. A site whose missing days were already tried this month is not retried at every restart (remember the attempt per site and month). So the cost is at most 2 credits per site per month.
 - Uses priority `"background"` so it yields to essential calls and respects the budget.
 - Answers treat `comm_state="backfill"` rows as normal data.
 
