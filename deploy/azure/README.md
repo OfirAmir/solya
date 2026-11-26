@@ -26,13 +26,13 @@ deploy/azure/create-vm.sh
 
 It shows the subscription and asks before going on (`--yes` skips the question). It checks that the region offers the VM size. If it doesn't, it lists the B-series sizes that are offered and stops.
 
-It then creates each of the following, skipping any that already exist. Every resource is tagged `app=solya`.
+It then creates each of the following, skipping any that already exist. Every resource is tagged `app=solya`. An existing resource group is used only if it already carries the tag `app=solya`; any other group is left alone and the script stops (see Troubleshooting).
 
 | Resource | Default name | Notes |
 | --- | --- | --- |
 | Resource group | `solya-rg` | in `israelcentral` |
 | Public IP | `solya-vm-ip` | Standard SKU, static, DNS label `solya-<6 random chars>` |
-| Network security group | `solya-vm-nsg` | inbound TCP 80 and 443 from `Internet`; TCP 22 from your current public IPv4 only. **Port 8000 is never opened.** |
+| Network security group | `solya-vm-nsg` | inbound TCP 80 and 443 from `Internet`; TCP 22 from your current public IPv4 only. **Port 8000 is never opened.** The VM is created with `--nsg-rule NONE`, so az adds no rule of its own, and the script then checks that the VM's network interface uses this NSG. |
 | VM | `solya-vm` | `Standard_B1ms`, `Canonical:ubuntu-24_04-lts:server:latest`, user `azureuser` |
 | VNet and subnet | `solya-vm-vnet`, `solya-vm-subnet` | `10.10.0.0/16` and `10.10.0.0/24` |
 
@@ -47,6 +47,8 @@ On the VM, over SSH, it:
 5. runs `SOLYA_SUBNET=192.168.250.0/24 /opt/solya/deploy/ec2/setup.sh --ip <public ip>`.
 
 Azure has no AWS metadata service. That is why the script passes the IP and the Docker subnet explicitly. The subnet is outside the `10.10.0.0/16` VNet.
+
+When it has just created the VM (not when it reuses one), it first removes any old SSH host keys for the FQDN and the IP from `~/.ssh/known_hosts` (`ssh-keygen -R`), since a new VM has new keys.
 
 At the end it prints the FQDN, the redirect URI `https://<fqdn>/oauth/callback` and the SSH command.
 
@@ -110,7 +112,7 @@ Re-run `deploy/azure/create-vm.sh`. It pulls the repo, and `setup.sh` pulls the 
 deploy/azure/create-vm.sh --destroy
 ```
 
-This lists the resources and asks you to type the resource group name, then deletes the whole group, including the database on the VM. Only after a successful delete does it remove the DNS label from `~/.solya-azure.env`.
+It refuses a resource group that is not tagged `app=solya`. Otherwise it lists the resources and asks you to type the resource group name, then deletes the whole group, including the database on the VM. Only after a successful delete does it remove the DNS label from `~/.solya-azure.env`.
 
 ## Troubleshooting
 
@@ -123,6 +125,12 @@ This lists the resources and asks you to type the resource group name, then dele
   ```bash
   deploy/azure/create-vm.sh --ssh-source 203.0.113.10,198.51.100.20
   ```
-- **`REMOTE HOST IDENTIFICATION HAS CHANGED`.** The VM was recreated under the same name. Remove the old key with `ssh-keygen -R <fqdn>`.
+- **`REMOTE HOST IDENTIFICATION HAS CHANGED`, or "SSH refused ...'s host key".** `known_hosts` has another key for the name or the IP, usually because the VM was recreated by hand or the address was reused. The script clears old keys itself only for a VM it has just created. If you trust the new VM, remove the old keys and re-run:
+  ```bash
+  ssh-keygen -R <fqdn>; ssh-keygen -R <public ip>
+  ```
+- **"resource group ... is not tagged app=solya".** The group exists but was not made by this script, so it may hold other resources. The script will neither use nor `--destroy` it. Pick another name with `--resource-group`. If the group really is Solya's, tag it first: `az group update -n <rg> --set tags.app=solya`.
+- **"network interface is not bound to the NSG".** After creating the VM, the script checks that its NIC uses `solya-vm-nsg`. If not, the VM's open ports are not the ones the script set. Check with `az network nic show --ids <nic id> --query networkSecurityGroup.id`, and fix it, or run `--destroy` and start over.
+- **macOS.** The script runs with the bash 3.2 that macOS ships (`/bin/bash`); no newer bash is needed.
 - **The size is not available.** Pick one of the listed sizes with `--size`, or use another region with `--location`.
 - **`setup.sh` stops on a check.** Read its message, and see Troubleshooting in `deploy/ec2/README.md`. Without `--ip` it stops with "could not read the public IPv4 from EC2 metadata". On Azure that is expected: pass `--ip`.
