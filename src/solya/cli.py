@@ -233,7 +233,7 @@ def cmd_report(args, settings: Settings, clock: Clock) -> int:
         if local_date is None:
             tz = s.scalars(select(Site.tz).where(Site.owner_id == owner.id)).first()
             local_date = now.astimezone(ZoneInfo(tz or settings.default_timezone)).date()
-        built = build_owner_report(s, owner.id, local_date, now, settings, load_ray(settings.ray_implementation))
+        built = build_owner_report(s, owner.id, local_date, now, settings, load_ray(settings.ray_implementation, settings))
     if built is None:
         raise CliError(f"owner {args.owner} has no active sites")
     card, text = built
@@ -329,7 +329,7 @@ def cmd_replay(args, settings: Settings, clock: Clock) -> int:
             print("site data is stale: no faults detected")
         day = compute_site_day(
             site, count, bundle, open_fault_views(s, site.se_site_id), now, settings,
-            load_ray(settings.ray_implementation), local_date=local_date, session=s,
+            load_ray(settings.ray_implementation, settings), local_date=local_date, session=s,
         )
         lifetime_wh = bundle.lifetime.energy_wh if bundle.lifetime is not None else None
         as_of = (bundle.site.last_update_time if bundle.site is not None else None) or pulled_at

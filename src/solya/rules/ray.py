@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 from datetime import date
 from typing import Literal, Protocol
 
@@ -13,22 +14,42 @@ RayBand = Literal["green", "orange", "yellow", "red"]
 
 
 class RayCalculator(Protocol):
-    def compute(self, site: Site, local_date: date, session: Session | None) -> float | None: ...
+    def compute(
+        self, site: Site, local_date: date, session: Session | None, actual_wh: float | None = None
+    ) -> float | None: ...
 
 
 class NullRay:
-    def compute(self, site: Site, local_date: date, session: Session | None) -> float | None:
+    def compute(
+        self, site: Site, local_date: date, session: Session | None, actual_wh: float | None = None
+    ) -> float | None:
         return None
 
 
-def load_ray(path: str | None) -> RayCalculator:
-    """Load a calculator from ``module:Class``; ``None`` or empty disables RAY."""
+def _takes_one_argument(cls: type) -> bool:
+    try:
+        params = list(inspect.signature(cls).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    positional = [
+        p for p in params if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.VAR_POSITIONAL)
+    ]
+    return len(positional) >= 1
+
+
+def load_ray(path: str | None, settings: object | None = None) -> RayCalculator:
+    """Load a calculator from ``module:Class``; ``None`` or empty disables RAY.
+
+    A class whose constructor takes one argument gets ``settings``; others get none.
+    """
     if not path:
         return NullRay()
     module_name, _, class_name = path.partition(":")
     if not module_name or not class_name:
         raise ValueError(f"RAY implementation must look like 'module:Class', got {path!r}")
     cls = getattr(importlib.import_module(module_name), class_name)
+    if _takes_one_argument(cls):
+        return cls(settings)
     return cls()
 
 

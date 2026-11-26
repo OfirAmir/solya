@@ -226,3 +226,26 @@ class WeatherDaily(Base):
     pm10: Mapped[float | None] = mapped_column(Float, nullable=True)
     source: Mapped[str] = mapped_column(String)
     fetched_at: Mapped[datetime] = mapped_column(UTCDateTime)
+
+
+class RayDaily(Base):
+    """Every RAY v1 component per site and day, for comparison with Instinct."""
+
+    __tablename__ = "ray_daily"
+
+    site_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    local_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    ray: Mapped[float | None] = mapped_column(Float, nullable=True)
+    perf: Mapped[float | None] = mapped_column(Float, nullable=True)
+    perf_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    hist_sub: Mapped[float | None] = mapped_column(Float, nullable=True)
+    health: Mapped[float | None] = mapped_column(Float, nullable=True)
+    env: Mapped[float | None] = mapped_column(Float, nullable=True)
+    expected_wh: Mapped[float | None] = mapped_column(Float, nullable=True)
+    expected_source: Mapped[str | None] = mapped_column(String, nullable=True)  # history|table
+    cv: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cloud_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    tmax_c: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pm10: Mapped[float | None] = mapped_column(Float, nullable=True)
+    confidence: Mapped[str | None] = mapped_column(String, nullable=True)  # normal|low
+    computed_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)

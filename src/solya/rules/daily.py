@@ -120,7 +120,8 @@ def compute_site_day(
     )
     if local_date is None:
         local_date = now.astimezone(ZoneInfo(site.tz)).date()
-    day.ray = ray.compute(site, local_date, session)
+    # Today's row is not persisted yet: RAY gets today's production directly.
+    day.ray = ray.compute(site, local_date, session, actual_wh=overview.production_wh)
     return day
 
 
