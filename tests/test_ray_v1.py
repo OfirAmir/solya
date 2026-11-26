@@ -251,3 +251,21 @@ def test_none_result_removes_stale_row(db, settings):
         s.flush()
         assert RayV1(settings).compute(site, D, s, actual_wh=A) is None
         assert stored(s) is None
+
+
+def test_computed_at_from_app_clock(db, settings):
+    from solya.clock import FixedClock
+
+    at = datetime(2026, 11, 25, 16, 30, tzinfo=timezone.utc)
+    with session_scope(db) as s:
+        site = farm(s)
+        RayV1(settings, clock=FixedClock(at)).compute(site, D, s, actual_wh=A)
+        assert stored(s).computed_at == at
+
+
+def test_load_ray_passes_clock_when_accepted(settings):
+    from solya.clock import FixedClock
+
+    clock = FixedClock(T0)
+    calc = load_ray("solya.rules.ray_v1:RayV1", settings, clock=clock)
+    assert calc._clock is clock

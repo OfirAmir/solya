@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import calendar
 import statistics
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from solya.clock import SystemClock
 from solya.models import DailyMetric, RayDaily, Site, WeatherDaily
 from solya.rules import ray_math as m
 
@@ -37,8 +38,9 @@ def _positive_mean(values: list[float], minimum: int) -> float | None:
 
 
 class RayV1:
-    def __init__(self, settings=None) -> None:
+    def __init__(self, settings=None, clock=None) -> None:
         self._settings = settings
+        self._clock = clock if clock is not None else SystemClock()
 
     def _real(self, session: Session, site_id: int, start: date, end: date) -> list[float]:
         """Real production values for ``start``..``end`` inclusive."""
@@ -138,6 +140,6 @@ class RayV1:
         row.tmax_c = weather.tmax_c
         row.pm10 = weather.pm10
         row.confidence = "low" if low else "normal"
-        row.computed_at = datetime.now(timezone.utc)
+        row.computed_at = self._clock.now()
         session.flush()
         return ray

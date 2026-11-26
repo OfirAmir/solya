@@ -38,10 +38,20 @@ def _takes_one_argument(cls: type) -> bool:
     return len(positional) >= 1
 
 
-def load_ray(path: str | None, settings: object | None = None) -> RayCalculator:
+def _takes_clock(cls: type) -> bool:
+    try:
+        return "clock" in inspect.signature(cls).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def load_ray(
+    path: str | None, settings: object | None = None, clock: object | None = None
+) -> RayCalculator:
     """Load a calculator from ``module:Class``; ``None`` or empty disables RAY.
 
     A class whose constructor takes one argument gets ``settings``; others get none.
+    A constructor with a ``clock`` parameter also gets ``clock`` when one is given.
     """
     if not path:
         return NullRay()
@@ -49,9 +59,10 @@ def load_ray(path: str | None, settings: object | None = None) -> RayCalculator:
     if not module_name or not class_name:
         raise ValueError(f"RAY implementation must look like 'module:Class', got {path!r}")
     cls = getattr(importlib.import_module(module_name), class_name)
+    kwargs = {"clock": clock} if clock is not None and _takes_clock(cls) else {}
     if _takes_one_argument(cls):
-        return cls(settings)
-    return cls()
+        return cls(settings, **kwargs)
+    return cls(**kwargs)
 
 
 def display_ray(score: float) -> int:

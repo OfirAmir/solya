@@ -86,7 +86,7 @@ def build_container(
     tokens = TokenManager(factory, settings, cipher, http, budget, clock, reauth)
     client = SolarEdgeClient(http, settings, tokens, budget, factory, clock)
     outbox = Outbox(factory, clock)
-    ray = load_ray(settings.ray_implementation, settings)
+    ray = load_ray(settings.ray_implementation, settings, clock=clock)
 
     container = Container(
         settings=settings, clock=clock, session_factory=factory, cipher=cipher, http=http,
