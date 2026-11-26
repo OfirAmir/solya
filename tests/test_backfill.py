@@ -225,8 +225,79 @@ async def test_backfill_soon_never_raises(db, settings, clock, client, caplog):
     assert rows(db) == {}
     assert "ApiError" in caplog.text and "secret" not in caplog.text
 
-    with respx.mock:
-        mock_api()
-        reporter.backfill_soon(SITE)  # this month was tried (the 500 was logged): no call
+    with respx.mock:  # final fix 3a: a failed /energy is not "tried": the next start retries
+        e, _ = mock_api()
+        reporter.backfill_soon(SITE)
         await asyncio.gather(*list(reporter._background))
+        assert e.call_count == 1
+    assert len(rows(db)) == 25
+
+
+def credited(db):
+    with session_scope(db) as s:
+        return [(r.endpoint.rsplit("/", 1)[1], r.http_status)
+                for r in s.scalars(select(ApiLedger).where(ApiLedger.credited.is_(True)))]
+
+
+async def test_backfill_failed_energy_is_retried(db, client):
+    """Final fix 3a: only a 200 /energy answer marks the month as tried."""
+    seed(db)
+    with respx.mock:
+        mock_api(energy=httpx.Response(500))
+        with pytest.raises(Exception):
+            await backfill.backfill_month(client, db, SITE, NOW)
     assert rows(db) == {}
+    with respx.mock:
+        e, m = mock_api()
+        assert await backfill.backfill_month(client, db, SITE, NOW + timedelta(hours=1)) == 25
+        assert e.call_count == 1 and m.call_count == 1
+    assert credited(db) == [("energy", 200), ("telemetry", 200)]
+
+
+async def test_backfill_export_meter_failure_writes_nothing_and_retries(db, client):
+    """Final fix 3b: for an export-basis site a failed meter call (other than 404) writes
+    no rows and leaves the month untried. The retry reuses this month's stored /energy
+    answer, so successful calls stay at two credits for the month."""
+    seed(db, basis="export", tariff="0.48")
+    with respx.mock:
+        e, m = mock_api(meter=httpx.Response(503))
+        assert await backfill.backfill_month(client, db, SITE, NOW) == 0
+        assert e.call_count == 1 and m.call_count == 1
+    assert rows(db) == {}
+    later = NOW + timedelta(hours=1)
+    with respx.mock:
+        e, m = mock_api()
+        assert await backfill.backfill_month(client, db, SITE, later) == 25
+        assert e.call_count == 0 and m.call_count == 1
+    r = rows(db)[date(2026, 11, 3)]
+    assert r.production_wh == 13000.0 and r.export_wh == 4000.0
+    assert r.income_ils == Decimal("1.92")
+    with respx.mock:  # now tried: no more calls this month
+        e, m = mock_api()
+        assert await backfill.backfill_month(client, db, SITE, later + timedelta(days=1)) == 0
+        assert e.call_count == 0 and m.call_count == 0
+    assert credited(db) == [("energy", 200), ("telemetry", 200)]
+
+
+async def test_backfill_export_no_meter_counts_as_tried(db, client):
+    seed(db, basis="export", tariff="0.48")
+    with respx.mock:
+        mock_api(meter=httpx.Response(404))
+        assert await backfill.backfill_month(client, db, SITE, NOW) == 25
+    with respx.mock:
+        e, m = mock_api()
+        assert await backfill.backfill_month(client, db, SITE, NOW + timedelta(days=1)) == 0
+        assert e.call_count == 0 and m.call_count == 0
+
+
+async def test_backfill_production_meter_failure_keeps_production(db, client):
+    """A production-basis site needs no export for income: keep the rows, month tried."""
+    seed(db)
+    with respx.mock:
+        mock_api(meter=httpx.Response(503))
+        assert await backfill.backfill_month(client, db, SITE, NOW) == 25
+    assert rows(db)[date(2026, 11, 3)].export_wh is None
+    with respx.mock:
+        e, m = mock_api()
+        assert await backfill.backfill_month(client, db, SITE, NOW + timedelta(days=1)) == 0
+        assert e.call_count == 0 and m.call_count == 0
