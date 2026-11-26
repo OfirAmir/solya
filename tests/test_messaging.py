@@ -113,6 +113,21 @@ async def test_caption_limit_boundary_is_inclusive():
     bot.send_message.assert_not_awaited()
 
 
+async def test_caption_limit_counts_utf16_units():
+    """Final fix 5: Telegram counts UTF-16 code units; an emoji is two of them."""
+    fits = "☀️" + "x" * 1022  # U+2600 U+FE0F: 2 units, 1024 in all
+    bot = AsyncMock()
+    await TelegramChannel(bot).send(make_msg(text=fits, image=b"png"))
+    assert bot.send_photo.await_args.kwargs["caption"] == fits
+    over = "🌞" + "x" * 1023  # 1024 code points but 1025 UTF-16 units
+    assert len(over) == 1024
+    bot = AsyncMock()
+    await TelegramChannel(bot).send(make_msg(text=over, image=b"png"))
+    assert [c[0] for c in bot.method_calls] == ["send_photo", "send_message"]
+    bot.send_photo.assert_awaited_once_with(chat_id=555, photo=b"png")
+    assert bot.send_message.await_args.kwargs["text"] == over
+
+
 async def test_caption_errors_map_like_text():
     bot = AsyncMock()
     bot.send_photo.side_effect = Forbidden("blocked")
