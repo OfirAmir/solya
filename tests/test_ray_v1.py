@@ -237,3 +237,17 @@ def test_load_ray_returns_working_instance(db, settings):
     with session_scope(db) as s:
         site = farm(s)
         assert calc.compute(site, D, s, actual_wh=A) == pytest.approx(90.15, abs=1e-6)
+
+
+def test_none_result_removes_stale_row(db, settings):
+    with session_scope(db) as s:
+        site = farm(s)
+        assert RayV1(settings).compute(site, D, s, actual_wh=A) is not None
+        assert stored(s) is not None
+        assert RayV1(settings).compute(site, D, s, actual_wh=None) is None
+        assert stored(s) is None
+        assert RayV1(settings).compute(site, D, s, actual_wh=A) is not None
+        s.get(WeatherDaily, (SID, D)).pm10 = None
+        s.flush()
+        assert RayV1(settings).compute(site, D, s, actual_wh=A) is None
+        assert stored(s) is None

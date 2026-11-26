@@ -453,8 +453,11 @@ def cmd_ray_recompute(args, settings: Settings, clock: Clock) -> int:
                         reason = "no expected yield: the site has no kWp and no history"
         if reason is not None:
             s.query(RayDaily).filter_by(site_id=args.site, local_date=args.date).delete()
+            if metric is not None:
+                metric.ray = None
             print(f"RAY not computed: {reason}; any stored row for the day was removed")
             return 0
+        metric.ray = ray  # daily_metrics.ray agrees with ray_daily
         _ray_table([s.get(RayDaily, (args.site, args.date))])
     return 0
 

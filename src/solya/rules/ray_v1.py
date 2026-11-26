@@ -71,7 +71,22 @@ class RayV1:
     def compute(
         self, site: Site, local_date: date, session: Session | None, actual_wh: float | None = None
     ) -> float | None:
-        if session is None or actual_wh is None:
+        """RAY for the day, stored with its components; on None any stored row for the
+        day is removed so ray_daily never disagrees with daily_metrics.ray."""
+        if session is None:
+            return None
+        ray = self._compute(site, local_date, session, actual_wh)
+        if ray is None:
+            row = session.get(RayDaily, (site.se_site_id, local_date))
+            if row is not None:
+                session.delete(row)
+                session.flush()
+        return ray
+
+    def _compute(
+        self, site: Site, local_date: date, session: Session, actual_wh: float | None
+    ) -> float | None:
+        if actual_wh is None:
             return None
         weather = session.get(WeatherDaily, (site.se_site_id, local_date))
         if weather is None or None in (weather.cloud_pct, weather.tmax_c, weather.pm10):

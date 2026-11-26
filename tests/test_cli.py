@@ -470,3 +470,22 @@ def test_ray_recompute_refetches_incomplete_weather(cfg, factory, capsys):
     with session_scope(factory) as s:
         assert s.get(WeatherDaily, (HOME, DAY)).pm10 == 30.0
         assert s.get(RayDaily, (HOME, DAY)) is not None
+
+
+@respx.mock
+def test_ray_recompute_updates_daily_metrics_ray(cfg, factory, capsys):
+    from solya.models import RayDaily
+
+    _recompute_seed(factory)
+    with session_scope(factory) as s:
+        s.get(DailyMetric, (HOME, DAY)).ray = 12.0
+    _mock_meteo()
+    assert run(cfg, "ray", "recompute", "--site", str(HOME), "--date", "2026-11-24") == 0
+    with session_scope(factory) as s:
+        new = s.get(RayDaily, (HOME, DAY)).ray
+        assert s.get(DailyMetric, (HOME, DAY)).ray == new != 12.0
+        s.get(Site, HOME).peak_power_kwp_reported = None  # next recompute yields None
+    assert run(cfg, "ray", "recompute", "--site", str(HOME), "--date", "2026-11-24") == 0
+    with session_scope(factory) as s:
+        assert s.get(DailyMetric, (HOME, DAY)).ray is None
+        assert s.get(RayDaily, (HOME, DAY)) is None
