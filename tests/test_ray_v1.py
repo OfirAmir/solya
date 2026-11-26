@@ -269,3 +269,21 @@ def test_load_ray_passes_clock_when_accepted(settings):
     clock = FixedClock(T0)
     calc = load_ray("solya.rules.ray_v1:RayV1", settings, clock=clock)
     assert calc._clock is clock
+
+
+def test_feb_29_local_date(db, settings):
+    """A leap day: the same month one and two years back has only 28 days."""
+    leap = date(2028, 2, 29)
+    with session_scope(db) as s:
+        site = site_row(s)
+        for i in range(1, 31):
+            metric(s, leap - timedelta(days=i), 10000.0)
+        for year in (2027, 2026):
+            for day in range(1, 29):
+                metric(s, date(year, 2, day), 10000.0, "backfill")
+        weather(s, d=leap)
+        s.flush()
+        ray = RayV1(settings).compute(site, leap, s, actual_wh=10000.0)
+        row = s.get(RayDaily, (SID, leap))
+        assert ray is not None and row.expected_source == "history"
+        assert row.expected_wh == pytest.approx(10000.0)

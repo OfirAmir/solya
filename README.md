@@ -128,7 +128,7 @@ RAY is the daily score (0 to 100) shown on the card as "מדד RAY". It combines
 Settings (all in `.env`, see `.env.example`):
 
 - `RAY_IMPLEMENTATION=solya.rules.ray_v1:RayV1` turns RAY v1 on. Unset, nothing is computed or fetched.
-- `RAY_VISIBLE=true` shows RAY to owners (card, text total line, answers). The default `false` computes and stores RAY but shows it only to admins (`/admin` and `ray show`).
+- `RAY_VISIBLE=true` shows RAY to owners (card gauge and per-site score, per-site RAY and the total line in the text). The default `false` computes and stores RAY but shows it only to admins (`/admin` and `ray show`).
 - `RAY_NATIONAL_KWH_PER_KWP_DAY` is the 12-value monthly yield table (kWh per kWp per day, January first) used until a site has enough history. **The defaults are approximate PVGIS figures recalled from knowledge: PVGIS was unreachable when this was built. Oren should confirm them**, or supply his own table.
 
 Weather comes from Open-Meteo, which costs no SolarEdge credits. Its free tier is for **non-commercial use only**: a paid plan or the commercial host is needed before charging customers. Backfill of RAY history (the previous month and the same month one and two years back) costs at most **6 credits per site per month**, including the 2 credits of the month-to-date backfill, all at the lowest ("optional") priority.
@@ -184,8 +184,8 @@ Run inside the running container (`docker compose exec solya solya <command>`). 
 | `credits` | Credits used this cycle against the cap, usage per site over the last 30 days, and an estimated cost at $0.005 per credit. |
 | `report --owner ID [--date YYYY-MM-DD] --dry-run --out out/` | Builds the evening report from stored data only. Writes the PNG and prints the text. Sends nothing and makes no API calls. |
 | `pull --site ID [--kind evening\|midday] [--notify]` | Pulls one site from the live API now and processes it exactly like the scheduled pull: stores the raw responses, saves the day's figures (evening kind) and updates fault records. Uses credits. Prints the parsed result. Sends no Telegram messages unless `--notify` is given; faults it records are alerted by the service's next pull. Without `--notify` it opens new fault records but closes none, so the service's next pull closes them and sends the follow-up. |
-| `ray show --site ID [--date YYYY-MM-DD] [--days 7]` | Prints the stored RAY components per day, newest first (ray, perf, perf_ratio, hist_sub, health, env, expected_wh, expected_source, cv, cloud_pct, tmax_c, pm10, confidence). |
-| `ray recompute --site ID --date YYYY-MM-DD` | Recomputes that day's RAY from stored production. Fetches the weather from Open-Meteo's historical endpoint when it is missing. Never calls SolarEdge. When RAY cannot be computed (no production, no weather, no kWp) it prints why and deletes any stale `ray_daily` row for the day. |
+| `ray show --site ID [--date YYYY-MM-DD] [--days 7]` | Prints the stored RAY components per day, newest first, next to the day's actual production (actual_kwh, ray, perf, perf_ratio, hist_sub, health, env, expected_wh, expected_source, cv, cloud_pct, tmax_c, pm10, confidence). |
+| `ray recompute --site ID --date YYYY-MM-DD` | Recomputes that day's RAY from stored production. Fetches the weather from Open-Meteo's historical endpoint when it is missing. Never calls SolarEdge. Also refetches weather when any of cloud, Tmax or PM10 is missing, and sets `daily_metrics.ray` to the new value. When RAY cannot be computed (no production, no weather, no kWp) it prints why, deletes any stale `ray_daily` row for the day and clears `daily_metrics.ray`. Works whether or not `RAY_IMPLEMENTATION` is set (it always uses RAY v1). |
 | `replay --site ID --date YYYY-MM-DD [--dry-run]` | Re-parses the stored raw responses for that local day and recomputes the daily figures and prints the detected faults. Makes no API calls. See the note below. |
 
 ### Low call plan

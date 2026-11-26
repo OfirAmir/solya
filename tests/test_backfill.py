@@ -474,6 +474,8 @@ async def test_monthly_backfill_job_day_1_at_01_local(db, settings):
         s.add(Site(se_site_id=4, owner_id=1, portal_name="r", tz=TZ, monitored=True,
                    status="paused", created_at=NOW))
     reporter = FakeReporter()
+    # APScheduler fires on the real wall clock: the fake clock sits two days ahead of it so
+    # the startup DateTrigger never fires during the test (as in test_scheduler.py).
     day = datetime.now(timezone.utc).date() + timedelta(days=2)
     svc = SchedulerService(reporter, db, settings, FixedClock(
         datetime.combine(day, datetime.min.time(), timezone.utc)))
@@ -514,3 +516,25 @@ async def test_backfill_soon_skips_while_running(db, settings, clock, client, ca
         assert len(reporter._background) == 1
         await asyncio.gather(*list(reporter._background))
     assert len(rows(db)) == 25
+
+
+async def test_month_boundary_december_refetches_november_once(db, client, clock):
+    """November's month-to-date answer was fetched in November; in December the previous
+    month is a new range: its missing days are fetched once, then never again."""
+    seed(db)
+    with respx.mock:
+        range_api()
+        assert await backfill.backfill_month(client, db, SITE, NOW) == 25  # 1-25 Nov
+    dec = datetime(2026, 12, 3, 15, 0, tzinfo=timezone.utc)
+    clock.set(dec)
+    with respx.mock:
+        e, _ = range_api()
+        assert await backfill.backfill_history(client, db, SITE, dec) == 5 + 31 + 31
+        nov = [c for c in e.calls if c.request.url.params["from"] == _from(date(2026, 11, 1))]
+        assert len(nov) == 1
+    got = rows(db)
+    assert all(date(2026, 11, d) in got for d in range(1, 31))
+    with respx.mock:
+        e, m = range_api()
+        assert await backfill.backfill_history(client, db, SITE, dec + timedelta(days=1)) == 0
+        assert e.call_count == 0 and m.call_count == 0
