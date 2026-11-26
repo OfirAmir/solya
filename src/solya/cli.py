@@ -22,7 +22,7 @@ from solya.db import SessionFactory, init_db, make_engine, session_scope
 from solya.ingest import PullBundle
 from solya.models import DailyMetric, FaultRecord, Owner, RawResponse, RayDaily, Site
 from solya.rules.daily import compute_site_day, persist_site_day
-from solya.rules.faults import detect_faults, open_fault_views
+from solya.rules.faults import detect_faults, open_fault_views, open_mode_serials
 from solya.rules.ray import load_ray
 from solya.services import onboarding
 from solya.services.reporting import build_owner_report
@@ -325,6 +325,7 @@ def cmd_replay(args, settings: Settings, clock: Clock) -> int:
         detected = detect_faults(
             bundle, list(site.expected_inverters or []), now, True, "evening",
             settings.stale_after_minutes, settings.fault_min_samples,
+            open_mode_serials(s, site.se_site_id),
         )
         if detected is None:
             print("site data is stale: no faults detected")

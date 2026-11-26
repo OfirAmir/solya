@@ -33,6 +33,7 @@ from solya.rules.faults import (
     detect_faults,
     due_reminders,
     open_fault_views,
+    open_mode_serials,
     sync_faults,
 )
 from solya.rules.ray import RayCalculator, weighted_ray
@@ -366,7 +367,7 @@ class Reporter:
             monitored = site.monitored
             detected = detect_faults(
                 bundle, list(site.expected_inverters or []), now, daylight, kind, stale_after,
-                self._settings.fault_min_samples,
+                self._settings.fault_min_samples, open_mode_serials(s, site_id),
             ) if monitored else None
             if detected is not None:  # R12: stale data never touches fault records
                 # A silent pull never closes faults: it could not send the follow-up, and

@@ -52,6 +52,41 @@ def test_mode_fault_needs_min_samples():
                          min_fault_samples=3) == []
 
 
+def test_open_mode_fault_stays_detected_on_one_sample():
+    """Review fix: FAULT_MIN_SAMPLES gates opening only. An already open mode fault
+    stays detected with a single fault sample (e.g. an early pull right after wake-up)."""
+    last = {"S1": InverterState("S1", "LOCKED_GRID", None)}
+    one = {"S1": InverterState("S1", "MPPT", None, fault_mode="LOCKED_GRID", fault_samples=1)}
+    for inv in (last, one):
+        assert detect_faults(bundle(inverters=inv), ["S1"], NOW, True, "midday") == []
+        out = detect_faults(bundle(inverters=inv), ["S1"], NOW, True, "midday",
+                            open_mode_serials={"S1"})
+        assert [f.key for f in out] == ["mode:S1"]
+    # No fault sample at all: the open fault is not kept alive.
+    clean = {"S1": InverterState("S1", "MPPT", None)}
+    assert detect_faults(bundle(inverters=clean), ["S1"], NOW, True, "midday",
+                         open_mode_serials={"S1"}) == []
+    # Another serial's open fault does not lower the bar for S1.
+    assert detect_faults(bundle(inverters=last), ["S1"], NOW, True, "midday",
+                         open_mode_serials={"S2"}) == []
+
+
+def test_open_mode_serials_reads_open_records(db):
+    from solya.rules.faults import open_mode_serials
+
+    _seed(db)
+    with db() as s:
+        s.add(FaultRecord(site_id=1, key="mode:S1@20261120T1000Z", source="mode", code="FAULT",
+                          serial="S1", first_seen=NOW))
+        s.add(FaultRecord(site_id=1, key="mode:S2", source="mode", code="FAULT", serial="S2",
+                          first_seen=NOW, closed_at=NOW))
+        s.add(FaultRecord(site_id=1, key="alert:7", source="alert", code="E", serial="S3",
+                          first_seen=NOW))
+        s.commit()
+        assert open_mode_serials(s, 1) == {"S1"}
+        assert open_mode_serials(s, 2) == set()
+
+
 def test_min_samples_leaves_alerts_missing_and_zero_alone():
     """Persistence applies to inverter modes only."""
     inv = {"S1": InverterState("S1", "MPPT", None)}

@@ -799,6 +799,25 @@ async def test_single_fault_sample_does_not_alert(h, load_fixture):
         assert s.scalars(select(FaultRecord)).all() == []
 
 
+async def test_open_mode_fault_not_closed_by_single_sample_window(h, load_fixture):
+    """Review fix: a mode fault already open stays open when the next window has only
+    one fault sample (the last one, still LOCKED): no false "back to normal", no second
+    alert for a new episode."""
+    with respx.mock:
+        mock_site(load_fixture, HOME, inverters=LOCKED_TWICE)
+        await h.reporter.evening_pull(HOME)
+    assert len(h.sent("fault")) == 1
+    with respx.mock:
+        mock_site(load_fixture, HOME,
+                  inverters=home_status(("13:00", "MPPT"), ("14:00", "LOCKED_GRID")))
+        await h.reporter.evening_pull(HOME)
+    assert [m for m in h.channel.sent if m.dedupe_key.startswith("closed:")] == []
+    assert len(h.sent("fault")) == 1
+    with session_scope(h.db) as s:
+        (rec,) = s.scalars(select(FaultRecord)).all()
+        assert rec.closed_at is None
+
+
 async def test_fault_min_samples_setting(h, load_fixture):
     """FAULT_MIN_SAMPLES=1 restores the single-sample behaviour."""
     h.reporter._settings = h.reporter._settings.model_copy(update={"fault_min_samples": 1})

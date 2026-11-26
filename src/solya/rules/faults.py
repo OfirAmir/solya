@@ -1,6 +1,7 @@
 """Fault detection (pure) and fault record lifecycle (DB)."""
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -55,11 +56,15 @@ def detect_faults(
     kind: str,
     stale_after_minutes: int = 60,
     min_fault_samples: int = 2,
+    open_mode_serials: Collection[str] = (),
 ) -> list[DetectedFault] | None:
     """Faults visible in one pull. ``is_daylight`` is decided by the caller.
 
     An inverter fault mode counts only when at least ``min_fault_samples`` hourly
     samples of the window were a fault mode (FAULT_MIN_SAMPLES): one sample is a blip.
+    The gate applies to opening only: for a serial in ``open_mode_serials`` (its mode
+    fault is already open) one fault sample keeps it detected, so an early window with a
+    single sample never falsely closes it.
     SolarEdge alerts, a missing inverter and zero production are not gated.
 
     Returns None when the site is stale or unknown: no inference is possible, so the
@@ -95,7 +100,8 @@ def detect_faults(
             mode, samples = state.fault_mode, state.fault_samples
             if mode is None and is_fault_mode(state.last_mode):
                 mode, samples = state.last_mode, max(samples, 1)
-            if mode is not None and samples >= min_fault_samples:
+            needed = 1 if serial in open_mode_serials else min_fault_samples
+            if mode is not None and samples >= needed:
                 found.append(DetectedFault(f"mode:{serial}", "mode", mode, serial, now))
         if is_daylight:
             for serial in expected_inverters:
@@ -178,6 +184,20 @@ def sync_faults(
 
     session.flush()
     return events
+
+
+def open_mode_serials(session: Session, site_id: int) -> set[str]:
+    """Serials with an open inverter-mode fault: detection keeps them on one sample."""
+    return set(
+        session.scalars(
+            select(FaultRecord.serial).where(
+                FaultRecord.site_id == site_id,
+                FaultRecord.source == "mode",
+                FaultRecord.closed_at.is_(None),
+                FaultRecord.serial.is_not(None),
+            )
+        ).all()
+    )
 
 
 def open_fault_views(session: Session, site_id: int) -> list[FaultView]:
