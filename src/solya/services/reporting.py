@@ -240,6 +240,7 @@ class Reporter:
         self._delay_send = delay_send or self._default_delay_send
         self._retry_requested: set[tuple[int, date]] = set()
         self._background: set[asyncio.Task] = set()
+        self._backfilling: dict[int, asyncio.Task] = {}  # site_id -> running backfill
 
     # ------------------------------------------------------------------ pulls
 
@@ -707,7 +708,12 @@ class Reporter:
     def backfill_soon(self, site_id: int) -> None:
         """Run the month-to-date backfill for ``site_id`` in the background, then (RAY
         enabled) the history backfill. Never raises into the caller; failures are logged
-        by exception type only."""
+        by exception type only. A backfill already running for the site is not doubled."""
+        running = self._backfilling.get(site_id)
+        if running is not None and not running.done():
+            log.info("backfill for site %s already running; skipped", site_id)
+            return
+
         async def run() -> None:
             try:
                 await backfill_month(self._client, self._sf, site_id, self._clock.now())
@@ -729,6 +735,13 @@ class Reporter:
             return
         self._background.add(task)
         task.add_done_callback(self._background.discard)
+        self._backfilling[site_id] = task
+
+        def forget(t: asyncio.Task) -> None:
+            if self._backfilling.get(site_id) is t:
+                del self._backfilling[site_id]
+
+        task.add_done_callback(forget)
 
     # -------------------------------------------------------------- delivery
 

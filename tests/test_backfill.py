@@ -490,3 +490,27 @@ async def test_monthly_backfill_job_day_1_at_01_local(db, settings):
         svc.shutdown()
     await svc._run("monthly_backfill")
     assert reporter.calls == [SITE]
+
+
+async def test_backfill_soon_skips_while_running(db, settings, clock, client, caplog):
+    from solya.messaging.outbox import Outbox
+    from solya.rules.ray import NullRay
+    from solya.services.reporting import Reporter
+
+    from conftest import FakeChannel
+
+    seed(db)
+    reporter = Reporter(db, client, FakeTokens(), Outbox(db, clock), FakeChannel(), clock,
+                        settings, NullRay(), lambda sid, at: None)
+    with respx.mock:
+        e, m = mock_api()
+        with caplog.at_level(logging.INFO):
+            reporter.backfill_soon(SITE)
+            reporter.backfill_soon(SITE)  # still running: skipped
+            await asyncio.gather(*list(reporter._background))
+        assert e.call_count == 1 and m.call_count == 1
+        assert "already running" in caplog.text
+        reporter.backfill_soon(SITE)  # finished: a new call runs again (nothing left to fetch)
+        assert len(reporter._background) == 1
+        await asyncio.gather(*list(reporter._background))
+    assert len(rows(db)) == 25
