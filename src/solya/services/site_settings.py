@@ -86,6 +86,10 @@ def parse_site_form(
                 name = validate_name(str(raw_name))
             except ValueError:
                 errs["name"] = NAME_ERROR
+            # R3: the unchanged pre-filled default is not an owner's name: keep the stored
+            # names, so a one-system owner keeps reading "המערכת"
+            if name is not None and site.label_he is None and name == display_name(site):
+                name = None
         raw_basis = form.get(f"basis_{sid}")
         basis = site.income_basis if raw_basis is None else str(raw_basis)
         if basis not in BASES:

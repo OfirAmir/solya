@@ -241,3 +241,15 @@ def test_apply_edits_without_name_keeps_names(db):
         ss.apply_edits(s, 1, [ss.SiteEdit(1, None, "export", None, True)], lambda _: TODAY)
         site = s.get(Site, 1)
         assert (site.label_he, site.card_name, site.income_basis) == (None, "c", "export")
+
+
+def test_parse_site_form_unchanged_default_name_keeps_names():
+    """R3: the pre-filled default name, posted unchanged, is not saved as label_he."""
+    one, two = _sites()
+    form = FormData([("site", "1"), ("name_1", " IL 360 "), ("name_2", "המשק")])
+    edits, errors = ss.parse_site_form(form, [one, two])
+    assert errors == {}
+    assert [e.name for e in edits] == [None, "המשק"]  # two has an owner label: kept as a save
+    form = FormData([("site", "1"), ("name_1", "בית")])
+    edits, _ = ss.parse_site_form(form, [one])
+    assert edits[0].name == "בית"

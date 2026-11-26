@@ -903,3 +903,20 @@ def test_linked_owner_with_session_lands_on_settings(tc, container, load_fixture
     assert tc.cookies.get(SESSION_COOKIE) != session
     r = _callback(tc, container, owner_id, home)
     assert r.status_code == 200 and CONNECTED in r.text
+
+
+def test_sites_post_unchanged_default_name_keeps_label_empty(tc, container):
+    """R3: pressing המשך with the pre-filled name keeps label_he empty ("המערכת")."""
+    owner_id = _web_owner(tc, container)
+    _add_site(container, owner_id, 111111, name="IL 360 - בית")
+    with session_scope(container.session_factory) as s:
+        s.get(Site, 111111).card_name = "IL 360"
+    page = tc.get("/sites").text
+    data = {"csrf": _csrf(page), "site": "111111", "name_111111": "IL 360",
+            "basis_111111": "export", "tariff_111111": ""}
+    assert tc.post("/sites", data=data).status_code == 303
+    site = _site(container, 111111)
+    assert (site.label_he, site.card_name) == (None, "IL 360")
+    assert tc.post("/sites", data={**data, "name_111111": "בית"}).status_code == 303
+    site = _site(container, 111111)
+    assert (site.label_he, site.card_name) == ("בית", "בית")
