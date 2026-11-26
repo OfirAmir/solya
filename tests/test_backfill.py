@@ -538,3 +538,36 @@ async def test_month_boundary_december_refetches_november_once(db, client, clock
         e, m = range_api()
         assert await backfill.backfill_history(client, db, SITE, dec + timedelta(days=1)) == 0
         assert e.call_count == 0 and m.call_count == 0
+
+
+async def test_later_day_retry_reuses_stored_range_and_never_spends_a_third_credit(db, client):
+    """A retry on a later day after a failed meter call reuses the stored /energy answer,
+    which covers only the first try's range (to Nov 25). The days after it (Nov 26, 27)
+    belong to the evening pulls: the retry never writes them (nor overwrites the evening
+    rows) and never pays a second /energy credit, so the month stays at two credits."""
+    seed(db, basis="export", tariff="0.48")
+    with respx.mock:
+        e, m = mock_api(meter=httpx.Response(503))
+        assert await backfill.backfill_month(client, db, SITE, NOW) == 0
+        assert e.call_count == 1 and m.call_count == 1
+    # the evening pulls of Nov 26 and 27 wrote those days
+    existing(db, date(2026, 11, 26), wh=26000.0)
+    existing(db, date(2026, 11, 27), wh=27000.0)
+    later = NOW + timedelta(days=2)  # Nov 28: "yesterday" is now Nov 27
+    days = [date(2026, 11, d) for d in range(1, 29)]
+    with respx.mock:
+        e, m = mock_api(energy=energy_body(days), meter=meter_body(days))
+        assert await backfill.backfill_month(client, db, SITE, later) == 25
+        assert e.call_count == 0 and m.call_count == 1
+    r = rows(db)
+    assert max(d for d, row in r.items() if row.comm_state == backfill.COMM_STATE) == date(
+        2026, 11, 25)
+    assert r[date(2026, 11, 26)].production_wh == 26000.0
+    assert r[date(2026, 11, 27)].production_wh == 27000.0
+    assert date(2026, 11, 28) not in r
+    with respx.mock:  # tried: no further calls this month, on any later day
+        e, m = mock_api(energy=energy_body(days), meter=meter_body(days))
+        assert await backfill.backfill_month(client, db, SITE, later + timedelta(days=1)) == 0
+        assert e.call_count == 0 and m.call_count == 0
+    assert [c for c in credited(db) if c[0] == "energy"] == [("energy", 200)]
+    assert credited(db) == [("energy", 200), ("telemetry", 200)]
