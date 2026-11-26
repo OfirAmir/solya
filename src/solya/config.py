@@ -6,7 +6,7 @@ import json
 import math
 from typing import Annotated
 
-from pydantic import AnyHttpUrl, SecretStr, field_validator
+from pydantic import AnyHttpUrl, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     max_credits_per_site_month: int = 350
     stale_after_minutes: int = 60
     fault_reminder_hours: int = 3
+    # An inverter fault mode alerts only after this many hourly samples in the day.
+    fault_min_samples: int = Field(2, ge=1)
     evening_pull_offset_minutes: int = 25
     report_offset_minutes: int = 30
     default_check_times: list[str] = ["12:30"]

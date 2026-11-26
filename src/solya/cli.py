@@ -324,7 +324,7 @@ def cmd_replay(args, settings: Settings, clock: Clock) -> int:
         count = len(s.scalars(select(Site.se_site_id).where(Site.owner_id == site.owner_id)).all())
         detected = detect_faults(
             bundle, list(site.expected_inverters or []), now, True, "evening",
-            settings.stale_after_minutes,
+            settings.stale_after_minutes, settings.fault_min_samples,
         )
         if detected is None:
             print("site data is stale: no faults detected")

@@ -91,6 +91,7 @@ def parse_inverter_status(j: dict, tz: str) -> dict[str, InverterState]:
             last_mode_at=_time(last.get("timestamp"), tz) if last else None,
             fault_mode=fault.get("value") if fault else None,
             fault_at=_time(fault.get("timestamp"), tz) if fault else None,
+            fault_samples=sum(1 for v in values if is_fault_mode(v.get("value"))),
         )
     return out
 

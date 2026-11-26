@@ -364,7 +364,8 @@ class Reporter:
             # leave its faults and comm state as they are and tell nobody.
             monitored = site.monitored
             detected = detect_faults(
-                bundle, list(site.expected_inverters or []), now, daylight, kind, stale_after
+                bundle, list(site.expected_inverters or []), now, daylight, kind, stale_after,
+                self._settings.fault_min_samples,
             ) if monitored else None
             if detected is not None:  # R12: stale data never touches fault records
                 # A silent pull never closes faults: it could not send the follow-up, and

@@ -48,8 +48,13 @@ def detect_faults(
     is_daylight: bool,
     kind: str,
     stale_after_minutes: int = 60,
+    min_fault_samples: int = 2,
 ) -> list[DetectedFault] | None:
     """Faults visible in one pull. ``is_daylight`` is decided by the caller.
+
+    An inverter fault mode counts only when at least ``min_fault_samples`` hourly
+    samples of the window were a fault mode (FAULT_MIN_SAMPLES): one sample is a blip.
+    SolarEdge alerts, a missing inverter and zero production are not gated.
 
     Returns None when the site is stale or unknown: no inference is possible, so the
     caller must skip ``sync_faults`` and leave open faults open.
@@ -81,10 +86,10 @@ def detect_faults(
         for serial, state in bundle.inverters.items():
             # R24: any fault sample in the window (midnight to now), not only the last.
             # The detection time stays the pull time (acceptance a7).
-            mode = state.fault_mode
+            mode, samples = state.fault_mode, state.fault_samples
             if mode is None and is_fault_mode(state.last_mode):
-                mode = state.last_mode
-            if mode is not None:
+                mode, samples = state.last_mode, max(samples, 1)
+            if mode is not None and samples >= min_fault_samples:
                 found.append(DetectedFault(f"mode:{serial}", "mode", mode, serial, now))
         if is_daylight:
             for serial in expected_inverters:

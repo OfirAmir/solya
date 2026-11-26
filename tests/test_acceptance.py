@@ -438,7 +438,9 @@ async def test_a7_fault_template_parts(c, load_fixture):
     await c.reporter.send_reminders()
     c.clock.set(datetime(2026, 11, 25, 10, 30, tzinfo=timezone.utc))
     with respx.mock:
-        mock_site(load_fixture, FARM, alerts="alerts_fan.json", inverters="inverters_status_fault.json",
+        # Two LOCKED_GRID hourly samples: the persistence gate (FAULT_MIN_SAMPLES=2) passes.
+        mock_site(load_fixture, FARM, alerts="alerts_fan.json",
+                  inverters="inverters_status_fault_persistent.json",
                   site=site_body(load_fixture, FARM, "2026-11-25T12:25:00+02:00"))
         await c.reporter.midday_check(FARM)
     texts = [m.text for m in sent(c, "fault")]

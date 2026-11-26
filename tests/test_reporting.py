@@ -469,7 +469,7 @@ async def test_midday_sends_fault_never_report(h, load_fixture):
     fresh = site_body(load_fixture, FARM, "2026-11-24T12:25:00+02:00")
     with respx.mock:
         r = mock_site(load_fixture, FARM, site=fresh, alerts="alerts_fan.json",
-                      inverters="inverters_status_fault.json")
+                      inverters="inverters_status_fault_persistent.json")
         await h.reporter.midday_check(FARM)
     assert not r["lifetime"].called
     assert h.sent("report") == []
@@ -784,11 +784,37 @@ def home_status(*samples):
     return {"inverters": {"7F11A2B3-C4": {"inverterMode": {"values": values}}}}
 
 
+# Two hourly LOCKED_GRID samples: enough for a mode fault (FAULT_MIN_SAMPLES=2).
+LOCKED_TWICE = home_status(("13:00", "LOCKED_GRID"), ("14:00", "LOCKED_GRID"))
+
+
+async def test_single_fault_sample_does_not_alert(h, load_fixture):
+    """Persistence: one LOCKED_GRID hourly sample is a blip; no fault record, no alert."""
+    with respx.mock:
+        mock_site(load_fixture, FARM, alerts="alerts_empty.json",
+                  inverters="inverters_status_fault.json")
+        await h.reporter.midday_check(FARM)
+    assert h.sent("fault") == []
+    with session_scope(h.db) as s:
+        assert s.scalars(select(FaultRecord)).all() == []
+
+
+async def test_fault_min_samples_setting(h, load_fixture):
+    """FAULT_MIN_SAMPLES=1 restores the single-sample behaviour."""
+    h.reporter._settings = h.reporter._settings.model_copy(update={"fault_min_samples": 1})
+    with respx.mock:
+        mock_site(load_fixture, FARM, alerts="alerts_empty.json",
+                  inverters="inverters_status_fault.json")
+        await h.reporter.midday_check(FARM)
+    (alert,) = h.sent("fault")
+    assert "LOCKED_GRID" in alert.text
+
+
 async def test_evening_pull_sees_daytime_inverter_fault(h, load_fixture):
     """I4: a home site (evening pull only) with a midday LOCKED_GRID gets the alert,
     although the last sample at dusk is no longer a fault mode."""
-    status = home_status(("09:00", "MPPT"), ("11:00", "LOCKED_GRID"), ("12:00", "MPPT"),
-                         ("16:00", "SLEEPING"))
+    status = home_status(("09:00", "MPPT"), ("11:00", "LOCKED_GRID"), ("12:00", "LOCKED_GRID"),
+                         ("13:00", "MPPT"), ("16:00", "SLEEPING"))
     with respx.mock:
         mock_site(load_fixture, HOME, inverters=status)
         await h.reporter.evening_pull(HOME)
@@ -801,7 +827,7 @@ async def test_internal_fault_close_does_not_claim_solaredge_closed_it(h, load_f
     """I4/R24: a mode fault clearing gets the "back to normal" text, not the
     "according to SolarEdge the alert closed" text."""
     with respx.mock:
-        mock_site(load_fixture, HOME, inverters=home_status(("13:00", "LOCKED_GRID")))
+        mock_site(load_fixture, HOME, inverters=LOCKED_TWICE)
         await h.reporter.evening_pull(HOME)
     with respx.mock:
         mock_site(load_fixture, HOME, inverters=home_status(("13:00", "MPPT")))
@@ -837,7 +863,7 @@ async def test_silent_pull_leaves_notified_fault_open(h, load_fixture):
     """A silent `solya pull` must not close a notified fault: closing it there would drop
     the spec §5.5 follow-up for good. The next notifying pull closes it and says so."""
     with respx.mock:
-        mock_site(load_fixture, HOME, inverters=home_status(("13:00", "LOCKED_GRID")))
+        mock_site(load_fixture, HOME, inverters=LOCKED_TWICE)
         await h.reporter.evening_pull(HOME)
     assert len(h.sent("fault")) == 1
     with respx.mock:

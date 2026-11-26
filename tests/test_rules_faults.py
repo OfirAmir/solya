@@ -28,16 +28,43 @@ def test_detect_alert_fault():
 
 
 def test_detect_locked_mode():
-    inv = {"S1": InverterState("S1", "LOCKED_STAND_ALONE", None), "S2": InverterState("S2", "MPPT", None),
-           "S3": InverterState("S3", "FAULT", None)}
+    # Persistence: two hourly fault samples each (the default FAULT_MIN_SAMPLES).
+    inv = {"S1": InverterState("S1", "MPPT", None, fault_mode="LOCKED_STAND_ALONE", fault_samples=2),
+           "S2": InverterState("S2", "MPPT", None),
+           "S3": InverterState("S3", "FAULT", None, fault_mode="FAULT", fault_samples=3)}
     keys = {f.key: f.code for f in detect_faults(bundle(inverters=inv), [], NOW, True, "midday")}
     assert keys == {"mode:S1": "LOCKED_STAND_ALONE", "mode:S3": "FAULT"}
+
+
+def test_mode_fault_needs_min_samples():
+    """A single fault sample is a blip: no fault. Two samples in the window: a fault."""
+    one = {"S1": InverterState("S1", "MPPT", None, fault_mode="LOCKED_GRID", fault_samples=1)}
+    two = {"S1": InverterState("S1", "MPPT", None, fault_mode="LOCKED_GRID", fault_samples=2)}
+    assert detect_faults(bundle(inverters=one), ["S1"], NOW, True, "midday") == []
+    assert [f.key for f in detect_faults(bundle(inverters=two), ["S1"], NOW, True, "midday")] == ["mode:S1"]
+    # A last-sample-only state (no window count) is one sample.
+    last = {"S1": InverterState("S1", "FAULT", None)}
+    assert detect_faults(bundle(inverters=last), ["S1"], NOW, True, "midday") == []
+    assert [f.key for f in detect_faults(bundle(inverters=last), ["S1"], NOW, True, "midday",
+                                         min_fault_samples=1)] == ["mode:S1"]
+    three = {"S1": InverterState("S1", "MPPT", None, fault_mode="FAULT", fault_samples=2)}
+    assert detect_faults(bundle(inverters=three), ["S1"], NOW, True, "midday",
+                         min_fault_samples=3) == []
+
+
+def test_min_samples_leaves_alerts_missing_and_zero_alone():
+    """Persistence applies to inverter modes only."""
+    inv = {"S1": InverterState("S1", "MPPT", None)}
+    out = detect_faults(bundle([alert()], inverters=inv, production=0.0), ["S1", "S2"], NOW, True,
+                        "evening", min_fault_samples=5)
+    assert sorted(f.source for f in out) == ["alert", "missing", "zero"]
 
 
 def test_detect_daytime_fault_sample_after_dusk():
     """R24: the evening pull sees a midday LOCKED_GRID even though the last sample is SLEEPING."""
     at = NOW - timedelta(hours=5)
-    inv = {"S1": InverterState("S1", "SLEEPING", NOW, fault_mode="LOCKED_GRID", fault_at=at)}
+    inv = {"S1": InverterState("S1", "SLEEPING", NOW, fault_mode="LOCKED_GRID", fault_at=at,
+                               fault_samples=2)}
     out = detect_faults(bundle(inverters=inv), ["S1"], NOW, True, "evening")
     assert out == [DetectedFault("mode:S1", "mode", "LOCKED_GRID", "S1", NOW)]
 
