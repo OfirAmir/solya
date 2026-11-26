@@ -268,7 +268,6 @@ def _plain(s):
 
 
 def test_daily_report_income_labels():
-    from datetime import date  # noqa: F401
     farm = ok_day("משק", 305900, "137.64")
     home = ok_day("בית", 82600, "35.98", income_basis="export")
     out = _plain(he.daily_report("אורן", [farm, home], AT_1710, True))

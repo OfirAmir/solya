@@ -144,7 +144,13 @@ def _stored_day(
 def _card_row(d: SiteDay) -> CardRow:
     if d.state != "ok":
         return CardRow(d.card_name, None, None, CARD_NOTES[d.state])
-    return CardRow(d.card_name, d.production_wh, d.income_ils, None)
+    n = len(d.open_faults)
+    if n:
+        status = ("fault", f"התראה פתוחה: {d.open_faults[0].code}" + (f" +{n - 1}" if n > 1 else ""))
+    else:
+        status = ("ok", "אין התראות פעילות")
+    label = ("הכנסה מהזרמה" if d.income_basis == "export" else "הכנסה") if d.income_ils is not None else None
+    return CardRow(d.card_name, d.production_wh, d.income_ils, None, label, status)
 
 
 def build_owner_report(
@@ -177,11 +183,18 @@ def build_owner_report(
             sum(d.production_wh for d in days),
             sum((d.income_ils for d in days), Decimal("0")),
         )
+    header = he.hebrew_date(local_date)
+    updates = [site.last_update_time for site in shown]
+    if all(u is not None for u in updates):
+        as_of = min(updates).astimezone(ZoneInfo(shown[0].tz))
+        header += f" · נכון ל־{as_of:%H:%M}"
     card = CardData(
         ray=weighted_ray([(d.ray, d.kwp) for d in days]),
         rows=[_card_row(d) for d in days],
         total=total,
-        date_label=f"{local_date:%d.%m.%Y}",
+        header=header,
+        site_count=len(days),
+        footnote="הכנסה משוערת לפני מע״מ" if any(d.income_ils is not None for d in days) else None,
     )
     return card, he.daily_report(owner.display_name, days, local_dt, show_total)
 
@@ -424,6 +437,17 @@ class Reporter:
             if built is None:
                 return
             card, text = built
+            hint_key = None
+            if any(
+                site.tariff_ils_per_kwh is None
+                and site.status == "active" and site.comm_state != "loss"
+                for site in _owner_sites(s, owner_id, monitored_only=True)
+            ):
+                year, week, _ = local_date.isocalendar()
+                key_ = f"tariff_hint:{owner_id}:{year}-W{week:02d}"
+                if s.get(OutboxEntry, key_) is None:
+                    hint_key = key_
+                    text += "\n" + he.TARIFF_HINT
 
         try:
             png = render_card(card)
@@ -433,7 +457,14 @@ class Reporter:
         key = f"report:{owner_id}:{local_date.isoformat()}"
         if retry:
             key += ":retry" + (f":{site_id}" if site_id is not None else "")
-        await self._send(OutboundMessage(chat, "report", text, png, key))
+        delivered = await self._send(OutboundMessage(chat, "report", text, png, key))
+        if delivered and hint_key is not None:
+            with session_scope(self._sf) as s:
+                if s.get(OutboxEntry, hint_key) is None:
+                    s.add(OutboxEntry(
+                        dedupe_key=hint_key, channel=self.channel.name, recipient=chat,
+                        kind="report", status="sent", attempts=1, sent_at=now,
+                    ))
 
     async def retry_pull_and_report(self, site_id: int, local_date: date) -> None:
         await self.evening_pull(site_id, local_date)

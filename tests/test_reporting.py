@@ -22,6 +22,7 @@ from solya.services.reporting import Reporter
 from solya.solaredge.budget import CreditBudget
 from solya.solaredge.client import SolarEdgeClient
 from solya.solaredge.oauth import TokenManager, TokenPair
+from solya.text import he
 from solya.text.he import WELCOME_1, WELCOME_2
 from solya.text.rtl import RLM, rtl_text
 
@@ -183,7 +184,11 @@ async def test_evening_report_regression_20261124(h, load_fixture, cards):
     ]
     assert data.total == (402029.0, Decimal("180.68"))
     assert data.ray is None
-    assert data.date_label == "24.11.2026"
+    assert data.header.startswith("שלישי, 24 בנובמבר · נכון ל־")
+    assert data.footnote == "הכנסה משוערת לפני מע״מ"
+    assert data.site_count == 2
+    assert [r.income_label for r in data.rows] == ["הכנסה", "הכנסה מהזרמה"]
+    assert all(r.status == ("ok", "אין התראות פעילות") for r in data.rows)
     with session_scope(h.db) as s:
         assert s.get(DailyMetric, (FARM, DAY)).lifetime_wh == 671421060
         assert s.get(DailyMetric, (HOME, DAY)).income_ils == Decimal("38.03")
@@ -817,3 +822,49 @@ async def test_silent_pull_leaves_notified_fault_open(h, load_fixture):
         assert rec.closed_at is not None and rec.closed_notified_at is not None
     (closed,) = [m for m in h.channel.sent if m.dedupe_key.startswith("closed:")]
     assert "7F11A2B3-C4" in closed.text
+
+
+def test_card_row_fault_status():
+    from solya.rules.daily import FaultView, SiteDay
+
+    fv = [FaultView("FAN_ALERT_1", None, NOW, "alert"), FaultView("X", None, NOW, "alert")]
+    d = SiteDay(site_id=1, label="משק", card_name="משק", state="ok", production_wh=1000.0,
+                income_ils=Decimal("1.00"), open_faults=fv)
+    row = reporting._card_row(d)
+    assert row.status == ("fault", "התראה פתוחה: FAN_ALERT_1 +1")
+    assert row.income_label == "הכנסה"
+
+
+def test_report_header_as_of(h):
+    seed_stamps = {
+        FARM: datetime(2026, 11, 25, 15, 6, tzinfo=timezone.utc),
+        HOME: datetime(2026, 11, 25, 15, 1, tzinfo=timezone.utc),
+    }
+    with session_scope(h.db) as s:
+        for sid, ts in seed_stamps.items():
+            s.get(Site, sid).last_update_time = ts
+        now = datetime(2026, 11, 25, 15, 10, tzinfo=timezone.utc)
+        card, _ = reporting.build_owner_report(
+            s, 1, date(2026, 11, 25), now, h.reporter._settings, NullRay()
+        )
+        assert card.header == "רביעי, 25 בנובמבר · נכון ל־17:01"
+        s.get(Site, HOME).last_update_time = None
+        card, _ = reporting.build_owner_report(
+            s, 1, date(2026, 11, 25), now, h.reporter._settings, NullRay()
+        )
+        assert card.header == "רביעי, 25 בנובמבר"
+
+
+async def test_tariff_hint_weekly(h):
+    with session_scope(h.db) as s:
+        s.get(Site, FARM).tariff_ils_per_kwh = None
+        for sid, d in [(f, d) for f in (FARM, HOME) for d in (DAY, date(2026, 11, 25))]:
+            s.merge(DailyMetric(site_id=sid, local_date=d, production_wh=1000.0,
+                                    comm_state="ok", as_of=NOW, computed_at=NOW))
+    await h.reporter.evening_report(1, DAY)
+    await h.reporter.evening_report(1, date(2026, 11, 25))
+    first, second = h.sent("report")
+    assert he.TARIFF_HINT in first.text.replace(RLM, "")
+    assert he.TARIFF_HINT not in second.text.replace(RLM, "")
+    with session_scope(h.db) as s:
+        assert s.get(OutboxEntry, "tariff_hint:1:2026-W48") is not None
