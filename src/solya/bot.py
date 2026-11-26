@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Awaitable, Callable
 
 from telegram import Update
@@ -18,10 +19,23 @@ from solya.db import session_scope
 from solya.services import ai_answers, answers, onboarding
 from solya.text.he import (
     CHAT_BOUND_ELSEWHERE, HELP, INVITE_OK, LINKED_OK, NOT_INVITED, connect_link,
+    settings_link,
 )
 from solya.text.rtl import rtl_text
 
 log = logging.getLogger(__name__)
+
+BOT_COMMANDS: list[tuple[str, str]] = [
+    ("connect", "חיבור מערכת"),
+    ("settings", "הגדרות ותעריף"),
+    ("today", "היום"),
+    ("yesterday", "אתמול"),
+    ("month", "החודש"),
+    ("alerts", "התראות"),
+    ("help", "עזרה"),
+]
+
+_COMMAND_TEXT = re.compile(r"^/(\w+)(?:@\w+)?(?:\s.*)?$", re.DOTALL)
 
 Handler = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
 
@@ -95,16 +109,18 @@ def build_bot_application(token: str, container) -> Application:
         except Exception:
             log.exception("link-time messages for owner %s failed", owner_id)
 
-    async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _link_reply(update: Update, make_url, render) -> None:
         now = container.clock.now()
         with session_scope(container.session_factory) as s:
             owner = known_owner(s, update, now)
-            url = (
-                onboarding.create_connect_request(s, owner.id, now, container.settings)
-                if owner is not None
-                else None
-            )
-        await reply(update, connect_link(url) if url else NOT_INVITED)
+            url = make_url(s, owner.id, now, container.settings) if owner is not None else None
+        await reply(update, render(url) if url else NOT_INVITED)
+
+    async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await _link_reply(update, onboarding.create_connect_request, connect_link)
+
+    async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await _link_reply(update, onboarding.create_settings_link, settings_link)
 
     def answer_command(route: answers.Route) -> Handler:
         async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -117,7 +133,7 @@ def build_bot_application(token: str, container) -> Application:
         """``route`` None means free text, routed by its wording."""
         now = container.clock.now()
         ask_ai_for: int | None = None
-        question = update.effective_message.text or ""
+        question = answers.strip_marks(update.effective_message.text or "")
         with session_scope(container.session_factory) as s:
             owner = known_owner(s, update, now)
             if owner is None:
@@ -139,18 +155,36 @@ def build_bot_application(token: str, container) -> Application:
             )
         await reply(update, text)
 
+    commands: dict[str, Handler] = {}
+
     async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await _answer(update, None)
+        text = answers.strip_marks(update.effective_message.text or "")
+        m = _COMMAND_TEXT.match(text)
+        if m and m.group(1).lower() in commands:
+            await commands[m.group(1).lower()](update, context)
+            return
+        route = answers.route_text(text)
+        if route == "connect":
+            await connect(update, context)
+        elif route == "settings":
+            await settings_cmd(update, context)
+        else:
+            await _answer(update, None)
 
     async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         with session_scope(container.session_factory) as s:
             known_owner(s, update, container.clock.now())
         await reply(update, HELP)
 
-    app.add_handler(CommandHandler("start", _safe(start)))
-    app.add_handler(CommandHandler("connect", _safe(connect)))
+    commands.update(
+        start=_safe(start),
+        connect=_safe(connect),
+        settings=_safe(settings_cmd),
+        help=_safe(help_cmd),
+    )
     for route in ("today", "yesterday", "month", "alerts"):
-        app.add_handler(CommandHandler(route, _safe(answer_command(route))))
-    app.add_handler(CommandHandler("help", _safe(help_cmd)))
+        commands[route] = _safe(answer_command(route))
+    for name, fn in commands.items():
+        app.add_handler(CommandHandler(name, fn))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _safe(text_message)))
     return app

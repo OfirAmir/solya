@@ -12,9 +12,10 @@ from typing import Any
 import httpx
 from fastapi import FastAPI
 from sqlalchemy.engine import make_url
+from telegram import BotCommand
 from telegram.error import InvalidToken
 
-from solya.bot import build_bot_application
+from solya.bot import BOT_COMMANDS, build_bot_application
 from solya.clock import Clock, SystemClock
 from solya.config import Settings
 from solya.crypto import TokenCipher
@@ -123,6 +124,10 @@ def create_app(container: Container, start_background: bool = True) -> FastAPI:
                 raise StartupError(
                     "Telegram rejected the bot token: check TELEGRAM_BOT_TOKEN in .env"
                 ) from None
+            try:
+                await bot_app.bot.set_my_commands([BotCommand(c, d) for c, d in BOT_COMMANDS])
+            except Exception as exc:
+                log.warning("could not set the bot command menu: %s", type(exc).__name__)
             await bot_app.start()
             await bot_app.updater.start_polling()
             container.scheduler.start()

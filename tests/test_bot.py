@@ -315,3 +315,55 @@ async def test_start_link_plan_failure_still_replies_and_welcomes(settings, cloc
     await h["start"](upd, ctx)
     msg.reply_text.assert_called_once_with(rtl_text(he.LINKED_OK))
     assert [m.dedupe_key for m in fake_channel.sent] == [f"welcome1:{oid}", f"monitored:{oid}"]
+
+
+async def test_marked_command_dispatches(settings, clock, db):
+    _owner(db)
+    h = _handlers(settings, clock, db)
+    upd, ctx, msg = _upd(text="‎/connect‎")
+    await h["__text__"](upd, ctx)
+    assert "https://solya.example/connect/" in msg.reply_text.call_args[0][0]
+
+
+async def test_free_text_connect_request(settings, clock, db):
+    _owner(db)
+    h = _handlers(settings, clock, db)
+    upd, ctx, msg = _upd(text="את יכול לחבר לי גם את המערכת השניה שלי?")
+    await h["__text__"](upd, ctx)
+    assert "https://solya.example/connect/" in msg.reply_text.call_args[0][0]
+
+
+async def test_settings_command_known_owner(settings, clock, db):
+    _owner(db)
+    h = _handlers(settings, clock, db)
+    upd, ctx, msg = _upd(text="/settings")
+    await h["settings"](upd, ctx)
+    out = msg.reply_text.call_args[0][0]
+    assert "https://solya.example/settings/" in out and "15 דקות" in out
+    assert "‎/" not in out and "‏/" not in out
+
+
+async def test_settings_command_unknown(settings, clock, db):
+    h = _handlers(settings, clock, db)
+    upd, ctx, msg = _upd(text="/settings")
+    await h["settings"](upd, ctx)
+    assert "settings/" not in msg.reply_text.call_args[0][0]
+
+
+async def test_free_text_tariff_routes_to_settings(settings, clock, db):
+    _owner(db)
+    h = _handlers(settings, clock, db)
+    upd, ctx, msg = _upd(text="איפה משנים תעריף?")
+    await h["__text__"](upd, ctx)
+    assert "https://solya.example/settings/" in msg.reply_text.call_args[0][0]
+
+
+async def test_help_lists_commands(settings, clock, db):
+    _owner(db)
+    h = _handlers(settings, clock, db)
+    upd, ctx, msg = _upd(text="/help")
+    await h["help"](upd, ctx)
+    out = msg.reply_text.call_args[0][0]
+    for c in ("/connect", "/settings"):
+        assert c in out
+        assert not out[: out.index(c)].endswith(("‎", "‏"))

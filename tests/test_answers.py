@@ -125,4 +125,17 @@ def test_build_bot_application_registers_commands(settings, clock, db):
     container = SimpleNamespace(settings=settings, session_factory=db, clock=clock)
     app = build_bot_application("123456:test-bot-token", container)
     cmds = {c for h in app.handlers[0] if isinstance(h, CommandHandler) for c in h.commands}
-    assert cmds == {"start", "connect", "today", "yesterday", "month", "alerts", "help"}
+    assert cmds == {"start", "connect", "settings", "today", "yesterday", "month", "alerts", "help"}
+
+
+def test_strip_marks():
+    assert a.strip_marks("‎/connect‏ ﻿") == "/connect"
+    assert a.strip_marks("‪שלום‬") == "שלום"
+
+
+def test_new_routes_and_existing_unchanged():
+    assert a.route_text("את יכול לחבר לי גם את המערכת השניה שלי?") == "connect"
+    assert a.route_text("מה התעריף") == "settings"
+    assert a.route_text("אתמול") == "yesterday"
+    assert a.route_text("החודש") == "month"
+    assert a.route_text("התראות") == "alerts"
