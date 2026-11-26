@@ -6,7 +6,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Form, HTTPException, Request
@@ -14,7 +14,7 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy import func, select
 
 from solya.db import session_scope
-from solya.models import LlmUsage, Owner, RawResponse, Site
+from solya.models import LlmUsage, Owner, RawResponse, RayDaily, Site
 from solya.services import ai_answers
 from solya.web.journey import (
     FORM_EXPIRED, PRE_COOKIE, PRE_MAX_AGE, _container, _message, templates,
@@ -35,6 +35,7 @@ SOURCE_LABELS = {"web": "אתר", "bot": "בוט"}
 LOW_PLAN_NOTE = "תוכנית חסכונית: ללא זיהוי תקלות ממיר"  # spec 5.5
 SITE_STATUS_LABELS = {"active": "פעיל", "reauth_needed": "דורש חיבור מחדש", "paused": "מושהה"}
 DISPLAY_TZ = ZoneInfo("Asia/Jerusalem")
+CONFIDENCE_LABELS = {"normal": "רגילה", "low": "נמוכה"}
 
 
 def _password(request: Request) -> bytes:
@@ -150,6 +151,11 @@ async def admin_page(request: Request):
             select(LlmUsage.owner_id, func.sum(LlmUsage.input_tokens + LlmUsage.output_tokens))
             .where(LlmUsage.ts >= month_start).group_by(LlmUsage.owner_id)
         ).all())
+        yesterday = (now.astimezone(DISPLAY_TZ) - timedelta(days=1)).date()
+        ray_rows = {
+            r.site_id: r for r in s.scalars(
+                select(RayDaily).where(RayDaily.local_date == yesterday))
+        }
         sites_by_owner: dict[int, list[Site]] = {}
         for site in s.scalars(select(Site).order_by(Site.created_at, Site.se_site_id)):
             sites_by_owner.setdefault(site.owner_id, []).append(site)
@@ -172,6 +178,10 @@ async def admin_page(request: Request):
                     "plan_note": LOW_PLAN_NOTE if x.call_plan == "low" else None,
                     "status": SITE_STATUS_LABELS.get(x.status, x.status),
                     "comm_state": x.comm_state,
+                    "ray": ray_rows[x.se_site_id].ray if x.se_site_id in ray_rows else None,
+                    "ray_confidence": CONFIDENCE_LABELS.get(
+                        ray_rows[x.se_site_id].confidence, ray_rows[x.se_site_id].confidence
+                    ) if x.se_site_id in ray_rows else None,
                 } for x in sites],
                 "last_pull": _fmt(max(pulls)) if pulls else None,
                 "credits": sum(c.budget.used_by_site(x.se_site_id, cycle_start) for x in sites),

@@ -20,7 +20,7 @@ from solya.clock import Clock, SystemClock
 from solya.config import Settings
 from solya.db import SessionFactory, init_db, make_engine, session_scope
 from solya.ingest import PullBundle
-from solya.models import DailyMetric, FaultRecord, Owner, RawResponse, Site
+from solya.models import DailyMetric, FaultRecord, Owner, RawResponse, RayDaily, Site
 from solya.rules.daily import compute_site_day, persist_site_day
 from solya.rules.faults import detect_faults, open_fault_views
 from solya.rules.ray import load_ray
@@ -387,6 +387,77 @@ def cmd_pull(args, settings: Settings, clock: Clock) -> int:
     return 0
 
 
+RAY_COLUMNS = [
+    "ray", "perf", "perf_ratio", "hist_sub", "health", "env", "expected_wh",
+    "expected_source", "cv", "cloud_pct", "tmax_c", "pm10", "confidence",
+]
+HISTORICAL_FORECAST_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
+
+
+def _ray_table(rows: list[RayDaily]) -> None:
+    _table(["date"] + RAY_COLUMNS,
+           [[r.local_date] + [getattr(r, c) for c in RAY_COLUMNS] for r in rows])
+
+
+def cmd_ray_show(args, settings: Settings, clock: Clock) -> int:
+    with _session(settings) as s:
+        _site_or_fail(s, args.site)
+        q = select(RayDaily).where(RayDaily.site_id == args.site)
+        if args.date:
+            q = q.where(RayDaily.local_date <= args.date,
+                        RayDaily.local_date > args.date - timedelta(days=args.days))
+        rows = s.scalars(q.order_by(RayDaily.local_date.desc()).limit(args.days)).all()
+        _ray_table(rows)
+    return 0
+
+
+def cmd_ray_recompute(args, settings: Settings, clock: Clock) -> int:
+    """Recompute one day's RAY from stored production; weather comes from Open-Meteo's
+    historical endpoint when missing. Never calls SolarEdge."""
+    import httpx
+
+    from solya import weather
+    from solya.models import WeatherDaily
+    from solya.rules.ray_v1 import REAL_STATES, RayV1
+
+    async def fetch(site: Site):
+        async with httpx.AsyncClient() as http:
+            return await weather.fetch_day(
+                http, site.lat, site.lon, site.tz, args.date,
+                forecast_base=HISTORICAL_FORECAST_URL,
+            )
+
+    with _session(settings) as s:
+        site = _site_or_fail(s, args.site)
+        metric = s.get(DailyMetric, (args.site, args.date))
+        actual = metric.production_wh if metric and metric.comm_state in REAL_STATES else None
+        reason = None
+        if actual is None:
+            reason = "no production stored for that day"
+        else:
+            if s.get(WeatherDaily, (args.site, args.date)) is None:
+                if site.lat is None or site.lon is None:
+                    reason = "no weather stored and the site has no coordinates"
+                else:
+                    day = asyncio.run(fetch(site))
+                    weather.store_day(s, args.site, args.date, day, clock.now())
+                    s.flush()
+            if reason is None:
+                ray = RayV1(settings).compute(site, args.date, s, actual_wh=actual)
+                if ray is None:
+                    w = s.get(WeatherDaily, (args.site, args.date))
+                    if w is None or None in (w.cloud_pct, w.tmax_c, w.pm10):
+                        reason = "weather is missing or incomplete for that day"
+                    else:
+                        reason = "no expected yield: the site has no kWp and no history"
+        if reason is not None:
+            s.query(RayDaily).filter_by(site_id=args.site, local_date=args.date).delete()
+            print(f"RAY not computed: {reason}; any stored row for the day was removed")
+            return 0
+        _ray_table([s.get(RayDaily, (args.site, args.date))])
+    return 0
+
+
 # ------------------------------------------------------------------- parser
 
 
@@ -458,6 +529,17 @@ def build_parser() -> argparse.ArgumentParser:
     rpl.add_argument("--date", type=_date, required=True)
     rpl.add_argument("--dry-run", action="store_true", help="print only, save nothing")
     rpl.set_defaults(fn=cmd_replay)
+
+    ray = sub.add_parser("ray", help="RAY comparison tools").add_subparsers(dest="sub", required=True)
+    rs = ray.add_parser("show", help="stored RAY components, newest first")
+    rs.add_argument("--site", type=int, required=True)
+    rs.add_argument("--date", type=_date, help="last day to show (default: newest stored)")
+    rs.add_argument("--days", type=int, default=7)
+    rs.set_defaults(fn=cmd_ray_show)
+    rr = ray.add_parser("recompute", help="recompute a day from stored rows; no SolarEdge calls")
+    rr.add_argument("--site", type=int, required=True)
+    rr.add_argument("--date", type=_date, required=True)
+    rr.set_defaults(fn=cmd_ray_recompute)
     return p
 
 

@@ -10,7 +10,7 @@ Solya watches SolarEdge solar sites through the SolarEdge Monitoring **V2** API 
 - Owners can also join through an invite-gated Hebrew web journey: sign up, connect the SolarEdge site, see the price, a payment stub, and a Telegram deep link that links the chat (see "Web journey" below).
 - Admin work is done with the `solya` command line tool. A read-only page at `/admin` (password from `ADMIN_PASSWORD`) lists owners, sites and usage. Logout revokes the admin cookie in memory only: after a restart a copied cookie stays valid until it expires (12 h).
 
-RAY is a pluggable slot and is **disabled** until the real formula is supplied. While `RAY_IMPLEMENTATION` is unset, no RAY circle and no "RAY" word appear anywhere.
+RAY is a pluggable slot. While `RAY_IMPLEMENTATION` is unset it is **disabled** and no RAY circle or "RAY" word appears anywhere. See "RAY" below.
 
 ## Setup for the real run
 
@@ -121,6 +121,24 @@ Do these steps in order.
 
     Run them as `docker compose exec solya solya sites set ...`. Quote any value with spaces.
 
+## RAY
+
+RAY is the daily score (0 to 100) shown on the card as "מדד RAY". It combines how the system performed against its expected yield and its own history (Perf), how steady it has been over the last 30 days (Health) and the day's weather (Env: cloud cover, maximum temperature, PM10). Every component is stored per site and day in the `ray_daily` table so it can be compared with the existing Instinct score.
+
+Settings (all in `.env`, see `.env.example`):
+
+- `RAY_IMPLEMENTATION=solya.rules.ray_v1:RayV1` turns RAY v1 on. Unset, nothing is computed or fetched.
+- `RAY_VISIBLE=true` shows RAY to owners (card, text total line, answers). The default `false` computes and stores RAY but shows it only to admins (`/admin` and `ray show`).
+- `RAY_NATIONAL_KWH_PER_KWP_DAY` is the 12-value monthly yield table (kWh per kWp per day, January first) used until a site has enough history. **The defaults are approximate PVGIS figures recalled from knowledge: PVGIS was unreachable when this was built. Oren should confirm them**, or supply his own table.
+
+Weather comes from Open-Meteo, which costs no SolarEdge credits. Its free tier is for **non-commercial use only**: a paid plan or the commercial host is needed before charging customers. Backfill of RAY history (the previous month and the same month one and two years back) costs at most **6 credits per site per month**, including the 2 credits of the month-to-date backfill, all at the lowest ("optional") priority.
+
+Rollout:
+
+1. Set `RAY_IMPLEMENTATION` and keep `RAY_VISIBLE=false`. Restart. The next evening pulls store weather and RAY.
+2. Compare for a few weeks with `solya ray show --site ID` and the `/admin` page (yesterday's RAY and its confidence per site). Use `ray recompute` after fixing a site's kWp or data.
+3. Once Oren is happy with the numbers, set `RAY_VISIBLE=true` and restart.
+
 ## Owner settings
 
 Owners manage their own systems; the admin does not have to run `sites set`.
@@ -166,6 +184,8 @@ Run inside the running container (`docker compose exec solya solya <command>`). 
 | `credits` | Credits used this cycle against the cap, usage per site over the last 30 days, and an estimated cost at $0.005 per credit. |
 | `report --owner ID [--date YYYY-MM-DD] --dry-run --out out/` | Builds the evening report from stored data only. Writes the PNG and prints the text. Sends nothing and makes no API calls. |
 | `pull --site ID [--kind evening\|midday] [--notify]` | Pulls one site from the live API now and processes it exactly like the scheduled pull: stores the raw responses, saves the day's figures (evening kind) and updates fault records. Uses credits. Prints the parsed result. Sends no Telegram messages unless `--notify` is given; faults it records are alerted by the service's next pull. Without `--notify` it opens new fault records but closes none, so the service's next pull closes them and sends the follow-up. |
+| `ray show --site ID [--date YYYY-MM-DD] [--days 7]` | Prints the stored RAY components per day, newest first (ray, perf, perf_ratio, hist_sub, health, env, expected_wh, expected_source, cv, cloud_pct, tmax_c, pm10, confidence). |
+| `ray recompute --site ID --date YYYY-MM-DD` | Recomputes that day's RAY from stored production. Fetches the weather from Open-Meteo's historical endpoint when it is missing. Never calls SolarEdge. When RAY cannot be computed (no production, no weather, no kWp) it prints why and deletes any stale `ray_daily` row for the day. |
 | `replay --site ID --date YYYY-MM-DD [--dry-run]` | Re-parses the stored raw responses for that local day and recomputes the daily figures and prints the detected faults. Makes no API calls. See the note below. |
 
 ### Low call plan
@@ -220,7 +240,7 @@ These come from the API recon (section 8) and have not been checked against the 
 10. The alert timestamp format in live responses, and whether `category` is present.
 11. Which `inverters/status` fields are present on our sites' inverter models.
 12. Which "migrating V1 to V2" documentation page is current (two candidates exist on api-docs.solaredge.com).
-13. Open-Meteo terms, pricing, commercial host and `daily=sunset`. Telegram HTML tag list and webhook ports. Weather is only needed for RAY, which is disabled.
+13. Open-Meteo terms, pricing, commercial host and `daily=sunset`. Telegram HTML tag list and webhook ports. Weather is only needed for RAY; the free tier is non-commercial.
 
 ### Other open items
 
@@ -240,7 +260,6 @@ These come from the API recon (section 8) and have not been checked against the 
 - Any editing from the web. The `/admin` page is read-only; changes go through the CLI.
 - Real payments: the pay page is a stub and charges nothing.
 - Free-form Q&A by default. Only the fixed questions are answered unless the optional AI answers below are switched on.
-- Weather inputs. They are only needed for RAY, which is disabled until its formula arrives.
 - Anything that lets a customer message change an account. Inbound messages can only request a connect link, register with an invite, link a web sign-up's Telegram chat (the single-use link token from `/ready`), and acknowledge a fault. With AI answers on, a free-form message that matches no fixed question is also sent to the external AI provider (see "Optional AI answers"); the reply cannot change anything.
 
 ## Optional AI answers
