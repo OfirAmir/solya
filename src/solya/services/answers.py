@@ -29,9 +29,16 @@ def strip_marks(text: str) -> str:
     return _MARKS.sub("", text).strip()
 
 
+# A connect verb always means "connect another system" ("תחבר את המערכת השנייה").
+# "חבר"/"חברי" only as a whole word, so "חברת החשמל" is not a request to connect.
+_CONNECT_VERB = re.compile("לחבר|תחבר|חיבור|(?<![\u05d0-\u05ea])חברי?(?![\u05d0-\u05ea])")
+# The second system named without a verb: "ה" may precede each word ("המערכת השנייה").
+# Alone it asks to connect; with a question word ("כמה ייצרה המערכת השנייה היום?") it
+# is that question, about the system already connected.
+_CONNECT_NOUN = re.compile("מערכת נוספת|עוד מערכת|ה?מערכת ה?שני(?:ה|יה)")
+_QUESTION = re.compile("היום|אתמול|החודש|חודש|התראות|התראה|תקלה")
+
 _ROUTES: list[tuple[re.Pattern[str], Route]] = [
-    # "ה" may precede each word: "המערכת השנייה"
-    (re.compile("לחבר|תחבר|חיבור|מערכת נוספת|עוד מערכת|ה?מערכת ה?שני(?:ה|יה)"), "connect"),
     (re.compile("הגדרות|תעריף"), "settings"),
     (re.compile("אתמול"), "yesterday"),
     (re.compile("התראות|התראה|תקלה"), "alerts"),
@@ -41,6 +48,10 @@ _ROUTES: list[tuple[re.Pattern[str], Route]] = [
 
 
 def route_text(text: str) -> Route:
+    if _CONNECT_VERB.search(text):
+        return "connect"
+    if _CONNECT_NOUN.search(text) and not _QUESTION.search(text):
+        return "connect"
     for pattern, route in _ROUTES:
         if pattern.search(text):
             return route
