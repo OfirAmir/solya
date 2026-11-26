@@ -32,10 +32,12 @@ CONTEXT_DAYS = 31
 MAX_TOKENS = 300
 TIMEOUT_SECONDS = 20
 
-# Adapted from PR #1 (src/lib/llm/openrouter.ts): the same five rules.
+# Adapted from PR #1 (src/lib/llm/openrouter.ts): the same five rules, plus the owner
+# addressed in gender-neutral plural like the rest of Sol's copy.
 SYSTEM = " ".join(
     [
         "את סול, הנציגה של סוליה. את עונה בעברית, בגוף ראשון נקבה, קצר.",
+        "הפנייה ללקוח בלשון רבים ניטרלית מגדרית (למשל: תרצו, אתכם, שלכם), לעולם לא בלשון יחיד.",
         "את עונה רק מתוך ה-JSON של הנתונים השמורים שמצורף. אין להמציא מספר, סיבה או תחזית.",
         "קריאה חסרה היא לא אפס. אין להציע עבודה חשמלית עצמית.",
         "אין לבצע ואין לטעון שבוצעו ביטול, החזר, תשלום או פתיחת קריאת שירות.",

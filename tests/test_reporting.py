@@ -41,7 +41,7 @@ REGRESSION = (
     "משק: אין התראות פעילות. ‏317.0 קוט״ש, הכנסה ‏142.65 ₪\n"
     "בית: אין התראות פעילות. ‏85.0 קוט״ש, הכנסה מהזרמה ‏38.03 ₪\n"
     "סה״כ: ‏402.0 קוט״ש, ‏180.68 ₪ לפני מע״מ\n"
-    "לכל שאלה אני כאן. המשך ערב טוב."
+    "לכל שאלה אני כאן. שיהיה ערב טוב."
 )
 
 DEFAULTS = {
@@ -416,7 +416,7 @@ async def test_report_with_reauth_site(h, load_fixture, cards):
         "ערב טוב אורן,\n"
         "בית: החיבור ל־SolarEdge פג, שלחתי קישור לחיבור מחדש.\n"
         "משק: אין התראות פעילות. ‏317.0 קוט״ש, הכנסה ‏142.65 ₪\n"
-        "לכל שאלה אני כאן. המשך ערב טוב."
+        "לכל שאלה אני כאן. שיהיה ערב טוב."
     )
     assert [(r.name, r.note) for r in cards[0].rows] == [
         ("אורן סופר", None), ("IL 360", "נדרש חיבור מחדש")]
@@ -469,7 +469,7 @@ async def test_midday_sends_fault_never_report(h, load_fixture):
     fresh = site_body(load_fixture, FARM, "2026-11-24T12:25:00+02:00")
     with respx.mock:
         r = mock_site(load_fixture, FARM, site=fresh, alerts="alerts_fan.json",
-                      inverters="inverters_status_fault.json")
+                      inverters="inverters_status_fault_persistent.json")
         await h.reporter.midday_check(FARM)
     assert not r["lifetime"].called
     assert h.sent("report") == []
@@ -529,7 +529,7 @@ async def test_on_site_connected_welcomes(h):
     await h.reporter.on_site_connected(site, is_first=True)
 
     texts = [m.text for m in h.channel.sent]
-    connected = rtl_text("המערכת משק חוברה בהצלחה. יש לך עוד מערכת? שלח /connect.")
+    connected = rtl_text("המערכת משק חוברה בהצלחה. יש לך עוד מערכת? שלחו /connect.")
     assert texts == [connected, rtl_text(WELCOME_1)]
     assert f"{RLM}24/7" in texts[1]
     assert [seconds for seconds, _ in h.delayed] == [60]
@@ -545,7 +545,7 @@ async def test_on_site_connected_welcomes(h):
 async def test_on_site_connected_already_message(h):
     await h.reporter.on_site_connected(HOME, is_first=False, already=True)
     (msg,) = h.channel.sent
-    assert msg.text == rtl_text("המערכת בית כבר מחוברת. בחלון של SolarEdge בחר מערכת אחרת.")
+    assert msg.text == rtl_text("המערכת בית כבר מחוברת. בחלון של SolarEdge בחרו מערכת אחרת.")
     assert "\u200e" not in msg.text
     assert not h.delayed
 
@@ -553,7 +553,7 @@ async def test_on_site_connected_already_message(h):
 async def test_on_site_connected_command_has_no_direction_marks(h):
     await h.reporter.on_site_connected(HOME, is_first=False)
     (msg,) = h.channel.sent
-    assert msg.text.endswith("שלח /connect.")
+    assert msg.text.endswith("שלחו /connect.")
     assert "\u200f/connect" not in msg.text and "\u200e" not in msg.text
 
 
@@ -784,11 +784,75 @@ def home_status(*samples):
     return {"inverters": {"7F11A2B3-C4": {"inverterMode": {"values": values}}}}
 
 
+# Two hourly LOCKED_GRID samples: enough for a mode fault (FAULT_MIN_SAMPLES=2).
+LOCKED_TWICE = home_status(("13:00", "LOCKED_GRID"), ("14:00", "LOCKED_GRID"))
+
+
+async def test_single_fault_sample_does_not_alert(h, load_fixture):
+    """Persistence: one LOCKED_GRID hourly sample is a blip; no fault record, no alert."""
+    with respx.mock:
+        mock_site(load_fixture, FARM, alerts="alerts_empty.json",
+                  inverters="inverters_status_fault.json")
+        await h.reporter.midday_check(FARM)
+    assert h.sent("fault") == []
+    with session_scope(h.db) as s:
+        assert s.scalars(select(FaultRecord)).all() == []
+
+
+async def test_open_mode_fault_not_closed_by_single_sample_window(h, load_fixture):
+    """Review fix: a mode fault already open stays open when the next window has only
+    one fault sample (the last one, still LOCKED): no false "back to normal", no second
+    alert for a new episode."""
+    with respx.mock:
+        mock_site(load_fixture, HOME, inverters=LOCKED_TWICE)
+        await h.reporter.evening_pull(HOME)
+    assert len(h.sent("fault")) == 1
+    with respx.mock:
+        mock_site(load_fixture, HOME,
+                  inverters=home_status(("13:00", "MPPT"), ("14:00", "LOCKED_GRID")))
+        await h.reporter.evening_pull(HOME)
+    assert [m for m in h.channel.sent if m.dedupe_key.startswith("closed:")] == []
+    assert len(h.sent("fault")) == 1
+    with session_scope(h.db) as s:
+        (rec,) = s.scalars(select(FaultRecord)).all()
+        assert rec.closed_at is None
+
+
+async def test_weak_reminder_uses_suspicion_copy(h):
+    """Review fix: the reminder of an open WEAK_PRODUCTION reads as a suspicion, with the
+    site label, no raw code and no service-call advice."""
+    now = h.clock.now()
+    with session_scope(h.db) as s:
+        s.add(FaultRecord(site_id=FARM, key=f"weak:{FARM}", source="weak", code="WEAK_PRODUCTION",
+                          first_seen=now - timedelta(hours=4), notified_at=now - timedelta(hours=4),
+                          detail='{"days": 3, "pct": 62}'))
+        label = reporting.effective_label(
+            s.get(Site, FARM), len(reporting._owner_sites(s, 1, monitored_only=True)))
+    await h.reporter.send_reminders()
+    (rem,) = [m for m in h.channel.sent if m.dedupe_key.startswith("reminder:")]
+    assert rem.text == rtl_text(
+        f"ערב טוב אורן,\nתזכורת: עדיין קיים חשד לירידה בייצור ({label}). "
+        "אני ממשיכה לעקוב ואעדכן אתכם."
+    )
+    assert "WEAK_PRODUCTION" not in rem.text and "קריאת שירות" not in rem.text
+
+
+async def test_fault_min_samples_setting(h, load_fixture):
+    """FAULT_MIN_SAMPLES=1 restores the single-sample behaviour."""
+    h.reporter._settings = h.reporter._settings.model_copy(update={"fault_min_samples": 1})
+    with respx.mock:
+        mock_site(load_fixture, FARM, alerts="alerts_empty.json",
+                  inverters="inverters_status_fault.json")
+        await h.reporter.midday_check(FARM)
+    (alert,) = h.sent("fault")
+    assert "LOCKED_GRID" in alert.text
+
+
 async def test_evening_pull_sees_daytime_inverter_fault(h, load_fixture):
     """I4: a home site (evening pull only) with a midday LOCKED_GRID gets the alert,
     although the last sample at dusk is no longer a fault mode."""
-    status = home_status(("09:00", "MPPT"), ("11:00", "LOCKED_GRID"), ("12:00", "MPPT"),
-                         ("16:00", "SLEEPING"))
+    status = home_status(("09:00", "MPPT"), ("11:00", "LOCKED_GRID"), ("12:00", "LOCKED_GRID"),
+                         ("13:00", "MPPT"), ("16:00", "SLEEPING"))
     with respx.mock:
         mock_site(load_fixture, HOME, inverters=status)
         await h.reporter.evening_pull(HOME)
@@ -801,7 +865,7 @@ async def test_internal_fault_close_does_not_claim_solaredge_closed_it(h, load_f
     """I4/R24: a mode fault clearing gets the "back to normal" text, not the
     "according to SolarEdge the alert closed" text."""
     with respx.mock:
-        mock_site(load_fixture, HOME, inverters=home_status(("13:00", "LOCKED_GRID")))
+        mock_site(load_fixture, HOME, inverters=LOCKED_TWICE)
         await h.reporter.evening_pull(HOME)
     with respx.mock:
         mock_site(load_fixture, HOME, inverters=home_status(("13:00", "MPPT")))
@@ -837,7 +901,7 @@ async def test_silent_pull_leaves_notified_fault_open(h, load_fixture):
     """A silent `solya pull` must not close a notified fault: closing it there would drop
     the spec §5.5 follow-up for good. The next notifying pull closes it and says so."""
     with respx.mock:
-        mock_site(load_fixture, HOME, inverters=home_status(("13:00", "LOCKED_GRID")))
+        mock_site(load_fixture, HOME, inverters=LOCKED_TWICE)
         await h.reporter.evening_pull(HOME)
     assert len(h.sent("fault")) == 1
     with respx.mock:
@@ -990,3 +1054,119 @@ async def test_ray_database_error_is_not_swallowed(h, load_fixture):
 
     with pytest.raises(OperationalError):
         await pull_both(h, load_fixture)
+
+
+# ------------------------------------------------------- weak production
+
+
+class FakeRay:
+    """Stores a ray_daily row with a chosen perf_ratio, like RayV1 would."""
+
+    def __init__(self, perf_ratio, source="history", cloud=10.0):
+        self.perf_ratio, self.source, self.cloud = perf_ratio, source, cloud
+
+    def compute(self, site, local_date, session, actual_wh=None):
+        from solya.models import RayDaily
+
+        row = session.get(RayDaily, (site.se_site_id, local_date)) or RayDaily(
+            site_id=site.se_site_id, local_date=local_date)
+        row.perf_ratio, row.expected_source, row.cloud_pct = self.perf_ratio, self.source, self.cloud
+        session.add(row)
+        session.flush()
+        return 50.0
+
+
+def seed_weak_history(db, site_id, *perf_ratios):
+    from solya.models import RayDaily
+
+    with session_scope(db) as s:
+        for back, pr in enumerate(perf_ratios, start=1):
+            d = DAY - timedelta(days=back)
+            s.add(DailyMetric(site_id=site_id, local_date=d, production_wh=40000.0, comm_state="ok",
+                              as_of=NOW, computed_at=NOW))
+            s.add(RayDaily(site_id=site_id, local_date=d, perf_ratio=pr, expected_source="history",
+                           cloud_pct=10.0))
+
+
+def enable_weak(h, perf_ratio, **kw):
+    h.reporter._settings = h.reporter._settings.model_copy(
+        update={"weak_alerts_enabled": True, "ray_implementation": "solya.rules.ray_v1:RayV1"})
+    h.reporter._ray = FakeRay(perf_ratio, **kw)
+
+
+WEAK_ALERT = rtl_text(
+    "ערב טוב אורן,\n"
+    "קיים חשד סביר לירידה בייצור (בית): ב־3 הימים האחרונים המערכת ייצרה כ־61% מהצפוי "
+    "ביחס למזג האוויר. סיבות אפשריות: לכלוך על הפאנלים, הצללה או תקלה ברכיב. "
+    "אני ממשיכה לעקוב ואעדכן אתכם. איך תרצו להתקדם?"
+)
+
+
+async def test_weak_production_opens_and_recovers(h, load_fixture):
+    seed_weak_history(h.db, HOME, 62, 63)
+    enable_weak(h, 58)
+    with respx.mock:
+        mock_site(load_fixture, HOME)
+        await h.reporter.evening_pull(HOME)
+    (alert,) = h.sent("fault")
+    assert alert.text == WEAK_ALERT
+    assert alert.dedupe_key == f"fault:{HOME}:weak:{HOME}"
+    with session_scope(h.db) as s:
+        (rec,) = s.scalars(select(FaultRecord)).all()
+        assert (rec.source, rec.code, rec.notified_at is not None) == ("weak", "WEAK_PRODUCTION", True)
+
+    # A midday check knows nothing about weak production: the fault stays open.
+    h.clock.set(datetime(2026, 11, 25, 10, 30, tzinfo=timezone.utc))
+    with respx.mock:
+        mock_site(load_fixture, HOME, site=site_body(load_fixture, HOME, "2026-11-25T12:25:00+02:00"))
+        await h.reporter.midday_check(HOME)
+
+    # A cloudy evening is skipped: no close, no second alert.
+    h.clock.set(NOW + timedelta(days=1))
+    h.reporter._ray = FakeRay(99, cloud=90.0)
+    with respx.mock:
+        mock_site(load_fixture, HOME, site=site_body(load_fixture, HOME, "2026-11-25T16:40:00+02:00"))
+        await h.reporter.evening_pull(HOME)
+    with session_scope(h.db) as s:
+        (rec,) = s.scalars(select(FaultRecord)).all()
+        assert rec.closed_at is None
+    assert len(h.sent("fault")) == 1
+
+    # A clear evening at WEAK_RECOVER closes it with the design's message.
+    h.clock.set(NOW + timedelta(days=2))
+    h.reporter._ray = FakeRay(88)
+    with respx.mock:
+        mock_site(load_fixture, HOME, site=site_body(load_fixture, HOME, "2026-11-26T16:40:00+02:00"))
+        await h.reporter.evening_pull(HOME)
+    (closed,) = [m for m in h.channel.sent if m.dedupe_key.startswith("closed:")]
+    assert closed.text == rtl_text("ערב טוב אורן,\nהייצור (בית) חזר לרמה הצפויה. אמשיך לעקוב.")
+    assert closed.dedupe_key == f"closed:{HOME}:weak:{HOME}"
+
+
+async def test_weak_production_needs_three_counted_days(h, load_fixture):
+    seed_weak_history(h.db, HOME, 62)  # only two low days with tonight
+    enable_weak(h, 58)
+    with respx.mock:
+        mock_site(load_fixture, HOME)
+        await h.reporter.evening_pull(HOME)
+    assert h.sent("fault") == []
+
+
+async def test_weak_production_table_expectation_never_alerts(h, load_fixture):
+    seed_weak_history(h.db, HOME, 62, 63)
+    enable_weak(h, 58, source="table")
+    with respx.mock:
+        mock_site(load_fixture, HOME)
+        await h.reporter.evening_pull(HOME)
+    assert h.sent("fault") == []
+
+
+async def test_weak_production_off_by_default(h, load_fixture):
+    seed_weak_history(h.db, HOME, 62, 63)
+    h.reporter._ray = FakeRay(58)
+    with respx.mock:
+        mock_site(load_fixture, HOME)
+        await h.reporter.evening_pull(HOME)
+    assert h.sent("fault") == []
+    with session_scope(h.db) as s:
+        assert s.scalars(select(FaultRecord)).all() == []

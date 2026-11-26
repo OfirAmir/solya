@@ -290,3 +290,10 @@ def test_numeric_guard_ignores_invisible_controls(ch):
 async def test_ai_zero_width_split_number_blocked(ai_settings, db, owner_id):
     respx.post(URL).mock(return_value=_reply("הפקת 23\u200b11 קוט״ש"))
     assert await _ask(ai_settings, db, owner_id) == HELP
+
+
+def test_system_prompt_addresses_owner_in_plural():
+    """Sol stays feminine first person; the owner is addressed in gender-neutral plural."""
+    assert "בגוף ראשון נקבה" in ai_answers.SYSTEM
+    assert "פנייה ללקוח בלשון רבים" in ai_answers.SYSTEM
+    assert "תרצו" in ai_answers.SYSTEM and "אתכם" in ai_answers.SYSTEM

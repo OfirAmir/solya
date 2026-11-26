@@ -46,6 +46,8 @@ class InverterState:
     # The first FAULT/LOCKED_* sample in the status window, if any (R24).
     fault_mode: str | None = None
     fault_at: datetime | None = None
+    # How many (hourly) samples in the window were a fault mode; persistence gate.
+    fault_samples: int = 0
 
 
 @dataclass(frozen=True)

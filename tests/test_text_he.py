@@ -32,7 +32,7 @@ def test_report_regression_20261124():
         "משק: אין התראות פעילות. ‏317.0 קוט״ש, הכנסה ‏142.65 ₪\n"
         "בית: אין התראות פעילות. ‏85.0 קוט״ש, הכנסה ‏38.03 ₪\n"
         "סה״כ: ‏402.0 קוט״ש, ‏180.68 ₪ לפני מע״מ\n"
-        "לכל שאלה אני כאן. המשך ערב טוב."
+        "לכל שאלה אני כאן. שיהיה ערב טוב."
     )
 
 
@@ -86,7 +86,7 @@ def test_report_with_fault_line_and_closing():
         f"מומלץ לפתוח קריאת שירות מול {RLM}SolarEdge או להזמין טכנאי מוסמך."
     )
     assert lines[2] == f"משק: {RLM}317.0 קוט״ש, הכנסה {RLM}142.65 ₪"
-    assert lines[-1] == "אני ממשיכה לעקוב ואעדכן אותך. איך תרצה להתקדם?"
+    assert lines[-1] == "אני ממשיכה לעקוב ואעדכן אותך. איך תרצו להתקדם?"
 
 
 def test_fault_line_without_serial():
@@ -152,12 +152,12 @@ def test_every_line_starts_hebrew():
 def test_site_connected_portal_name_latin_gets_no_rlm_issue():
     # "Portal 1" follows Hebrew with a space, so it is RLM-prefixed per R2.
     assert he.site_connected("Portal 1") == (
-        f"המערכת {RLM}Portal {RLM}1 חוברה בהצלחה. יש לך עוד מערכת? שלח /connect.")
+        f"המערכת {RLM}Portal {RLM}1 חוברה בהצלחה. יש לך עוד מערכת? שלחו /connect.")
 
 
 def test_site_already_connected_exact():
     assert he.site_already_connected("משק") == (
-        f"המערכת משק כבר מחוברת. בחלון של {RLM}SolarEdge בחר מערכת אחרת.")
+        f"המערכת משק כבר מחוברת. בחלון של {RLM}SolarEdge בחרו מערכת אחרת.")
 
 
 def test_fault_alert_fan_exact():
@@ -169,7 +169,7 @@ def test_fault_alert_fan_exact():
         "ככל הנראה מדובר בתקלה במאוורר הקירור של הממיר. "
         "נדרשת בדיקה של איש מקצוע מוסמך לאבחון ולטיפול, ולא טיפול עצמי. "
         f"אני ממליצה לפתוח קריאת שירות מול {RLM}SolarEdge או להזמין טכנאי מוסמך. "
-        "אני ממשיכה לעקוב ואעדכן אותך. איך תרצה להתקדם?"
+        "אני ממשיכה לעקוב ואעדכן אותך. איך תרצו להתקדם?"
     )
 
 
@@ -204,7 +204,7 @@ def test_reminder_and_closed_exact():
         "בוקר טוב אורן,\n"
         f"תזכורת, ההתראה {RLM}FAN_ALERT_1 בממיר {RLM}7E04E44D-B3 עדיין פתוחה. "
         f"אני ממליצה לפתוח קריאת שירות מול {RLM}SolarEdge או להזמין טכנאי מוסמך. "
-        "אני ממשיכה לעקוב ואעדכן אותך. איך תרצה להתקדם?"
+        "אני ממשיכה לעקוב ואעדכן אותך. איך תרצו להתקדם?"
     )
     assert he.fault_closed("אורן", fault(), AT_0700) == (
         "בוקר טוב אורן,\n"
@@ -322,8 +322,119 @@ def test_persona_copy():
     from solya.text import he
 
     assert "בינה מלאכותית" in he.WELCOME_1
-    assert he._FOLLOW_UP.endswith("איך תרצה להתקדם?")
+    assert he._FOLLOW_UP.endswith("איך תרצו להתקדם?")
     assert "עדכן אותי" not in he._FOLLOW_UP
     for text in (he.HELP, he.INVITE_OK, he.TARIFF_HINT, he.settings_link("https://x/s/t")):
-        for plural in ("שלחו", "פתחו", "הזינו"):
-            assert plural not in text
+        for singular in ("שלח ", "פתח ", "הזן "):  # the owner is addressed in plural
+            assert not re.search(f"(?<![א-ת]){singular}", text)
+
+
+SINGULAR_FORMS = ("שלח ", "פתח את", "תרצה", "ברוך הבא", "המשך ערב", "הזן ", "בחר ")
+
+
+def _he_literals():
+    """Every string literal in he.py except docstrings: the owner-facing copy."""
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(he))
+    docs = {
+        id(node.body[0].value)
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Module, ast.FunctionDef))
+        and node.body and isinstance(node.body[0], ast.Expr)
+        and isinstance(node.body[0].value, ast.Constant)
+    }
+    return [
+        n.value for n in ast.walk(tree)
+        if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docs
+    ]
+
+
+def test_owner_is_addressed_in_gender_neutral_plural():
+    literals = _he_literals()
+    assert any("שלחו /connect" in s for s in literals)  # the scan sees the copy
+    for text in literals:
+        for form in SINGULAR_FORMS:  # as a word: "אשלח לך" is Sol, not an imperative
+            assert not re.search(f"(?<![א-ת]){form}", text), f"{form!r} in {text!r}"
+    assert he.WELCOME_1.startswith("ברוכים הבאים לסוליה")
+    assert he._FOLLOW_UP == "אני ממשיכה לעקוב ואעדכן אותך. איך תרצו להתקדם?"
+    assert "אני עוקבת" in he.comm_loss_alert("א", "ב", AT_1710, AT_1710)  # Sol stays feminine
+    assert "אני ממליצה" in he._ADVICE
+    days = [ok_day("משק", 316990, "142.65")]
+    assert he.daily_report("אורן", days, AT_1710, False).endswith(
+        "לכל שאלה אני כאן. שיהיה ערב טוב.")
+
+
+def weak(detail='{"days": 3, "pct": 62}'):
+    return FaultView("WEAK_PRODUCTION", None, AT_1710, "weak", detail)
+
+
+def test_weak_production_alert_copy():
+    out = he.fault_alert("אורן", None, weak(), AT_1710, AT_1710)
+    assert out == (
+        "ערב טוב אורן,\n"
+        "קיים חשד סביר לירידה בייצור: ב־3 הימים האחרונים המערכת ייצרה כ־62% מהצפוי "
+        "ביחס למזג האוויר. סיבות אפשריות: לכלוך על הפאנלים, הצללה או תקלה ברכיב. "
+        "אני ממשיכה לעקוב ואעדכן אתכם. איך תרצו להתקדם?"
+    )
+    labelled = he.fault_alert("אורן", "משק", weak(), AT_1710, AT_1710)
+    assert "קיים חשד סביר לירידה בייצור (משק): ב־3" in labelled
+
+
+def test_weak_production_closed_copy():
+    assert he.weak_recovered("אורן", None, AT_1710) == (
+        "ערב טוב אורן,\nהייצור חזר לרמה הצפויה. אמשיך לעקוב."
+    )
+    assert he.weak_recovered("אורן", "בית", AT_1710) == (
+        "ערב טוב אורן,\nהייצור (בית) חזר לרמה הצפויה. אמשיך לעקוב."
+    )
+
+
+def test_weak_copy_plural_and_no_direction_marks():
+    texts = [he.fault_alert("אורן", "משק", weak(), AT_1710, AT_1710),
+             he.weak_recovered("אורן", "משק", AT_1710)]
+    for text in texts:
+        assert RLM not in text and "‎" not in text
+        for form in SINGULAR_FORMS + ("אותך", "שלך", "תרצי", "אעדכן אותך"):
+            assert form not in text
+    assert "אעדכן אתכם" in texts[0] and "תרצו" in texts[0]
+
+
+def test_weak_alert_without_figures_still_reads():
+    out = he.fault_alert("אורן", None, weak(None), AT_1710, AT_1710)
+    assert "קיים חשד סביר לירידה בייצור: בימים האחרונים המערכת ייצרה פחות מהצפוי" in out
+
+
+def test_weak_production_reminder_copy():
+    """Review fix: the reminder keeps the suspicion wording, no raw code, no service call."""
+    assert he.fault_reminder("אורן", weak(), AT_1710) == (
+        "ערב טוב אורן,\n"
+        "תזכורת: עדיין קיים חשד לירידה בייצור. אני ממשיכה לעקוב ואעדכן אתכם."
+    )
+    assert he.fault_reminder("אורן", weak(), AT_1710, label="משק") == (
+        "ערב טוב אורן,\n"
+        "תזכורת: עדיין קיים חשד לירידה בייצור (משק). אני ממשיכה לעקוב ואעדכן אתכם."
+    )
+
+
+def test_weak_production_report_line():
+    """Review fix: an open weak-production suspicion is one calm line in the report."""
+    d = ok_day("משק", 316990, "142.65", open_faults=[weak()])
+    out = he.daily_report("אורן", [d], AT_1710, False)
+    lines = out.split("\n")
+    assert lines[1] == "משק: חשד לירידה בייצור, אני עוקבת."
+    assert lines[2] == f"משק: {RLM}317.0 קוט״ש, הכנסה {RLM}142.65 ₪"
+    assert lines[-1] == "לכל שאלה אני כאן. שיהיה ערב טוב."
+    for text in (out, he.fault_reminder("אורן", weak(), AT_1710, label="משק")):
+        assert "WEAK_PRODUCTION" not in text and "קריאת שירות" not in text
+        for form in SINGULAR_FORMS + ("אותך", "שלך"):
+            assert form not in text
+
+
+def test_weak_and_real_fault_in_report():
+    d = ok_day("משק", 1000, "1", open_faults=[weak(), fault()])
+    lines = he.daily_report("אורן", [d], AT_1710, False).split("\n")
+    assert lines[1] == "משק: חשד לירידה בייצור, אני עוקבת."
+    assert lines[2].startswith(f"משק: התראה פתוחה {RLM}FAN_ALERT_1")
+    assert lines[-1] == he._FOLLOW_UP

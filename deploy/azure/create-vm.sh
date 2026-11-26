@@ -11,6 +11,10 @@
 #   deploy/azure/create-vm.sh --destroy [--resource-group RG]
 #
 # See deploy/azure/README.md.
+#
+# Portable to the bash 3.2 that macOS ships: under `set -u`, bash before 4.4 treats an
+# empty array's "${arr[@]}" as unbound, so an array that may be empty is expanded as
+# ${arr[@]+"${arr[@]}"}. No mapfile/readarray, associative arrays or ${var,,}.
 
 set -euo pipefail
 
@@ -197,7 +201,7 @@ resolve_ssh_source() {
         IFS=',' read -r -a raw <<< "${SSH_SOURCE// /}"
     fi
     SSH_SOURCES=()
-    for item in "${raw[@]}"; do
+    for item in ${raw[@]+"${raw[@]}"}; do
         [[ -n "$item" ]] || continue
         ip="${item%/*}"
         prefix=32
@@ -257,15 +261,24 @@ save_label() {
 
 # ----------------------------------------------------------------------------- Azure resources
 
+# An existing group is used (or deleted) only when it is ours: tagged app=solya. A group
+# without the tag may hold someone else's resources, so the script refuses to touch it.
+require_solya_group() {  # what we were about to do, for the message
+    local tag
+    tag="$(azq group show -n "$RG" --query tags.app -o tsv || true)"
+    [[ "$tag" == solya ]] && return 0
+    die "resource group $RG exists but is not tagged app=solya (tag app: '${tag:-none}'), so it may not be Solya's. Refusing to $1 it. Pick another name with --resource-group, or, if it really is Solya's, tag it first: az group update -n $RG --set tags.app=solya"
+}
+
 ensure_group() {
     log "Resource group $RG ($LOCATION)"
     if [[ "$(azq group exists -n "$RG" || echo false)" == true ]]; then
+        require_solya_group use
         local loc
         loc="$(azq group show -n "$RG" --query location -o tsv || true)"
-        info "exists${loc:+ (in $loc)}"
+        info "exists, tagged app=solya${loc:+ (in $loc)}"
         [[ -z "$loc" || "$loc" == "$LOCATION" ]] \
             || warn "the group is in $loc; the VM and its resources will still go to $LOCATION"
-        run az group update -n "$RG" --set tags.app=solya -o none
     else
         run az group create -n "$RG" -l "$LOCATION" --tags "$TAG" -o none
     fi
@@ -335,6 +348,7 @@ ensure_nsg() {
     [[ -z "$open8000" ]] || warn "NSG rule(s) $open8000 allow port 8000 (or all ports) inbound. Remove them: Solya must only be reached through Caddy."
 }
 
+VM_CREATED=0   # 1 once this run created the VM (not when it reused one)
 SSH_KEY_ARGS=()
 SSH_ID_ARGS=()
 # ssh uses the private key next to the chosen .pub; with --generate-ssh-keys (id_rsa),
@@ -364,6 +378,7 @@ ensure_vm() {
             info "power state: $state; starting it"
             run az vm start -g "$RG" -n "$VM" -o none
         fi
+        check_nic_nsg  # a reused VM's NIC may have been rebound since it was created
         return
     fi
     pick_ssh_key
@@ -371,12 +386,34 @@ ensure_vm() {
     # nor its default NSG (which would open 22 to everyone). The VNet is new and explicit.
     run az vm create -g "$RG" -n "$VM" -l "$LOCATION" \
         --image "$IMAGE" --size "$SIZE" \
-        --admin-username "$ADMIN" "${SSH_KEY_ARGS[@]}" \
+        --admin-username "$ADMIN" ${SSH_KEY_ARGS[@]+"${SSH_KEY_ARGS[@]}"} \
         --public-ip-address "$VM-ip" --public-ip-sku Standard \
-        --nsg "$VM-nsg" \
+        --nsg "$VM-nsg" --nsg-rule NONE \
         --vnet-name "$VM-vnet" --vnet-address-prefix "$VNET_PREFIX" \
         --subnet "$VM-subnet" --subnet-address-prefix "$SUBNET_PREFIX" \
         --tags "$TAG" -o none
+    VM_CREATED=1
+    check_nic_nsg
+}
+
+# The VM's NIC (new or reused) must use our NSG (80/443 open, 22 from your addresses only).
+# If it is bound to another one, or none, stop: the VM's exposure would not be what this
+# script set. Read-only: it never changes the NIC.
+check_nic_nsg() {
+    if (( DRY_RUN )); then
+        info "[dry-run] check that the VM's NIC uses the NSG $VM-nsg"
+        return
+    fi
+    local nic nsg
+    nic="$(az vm show -g "$RG" -n "$VM" --query 'networkProfile.networkInterfaces[0].id' -o tsv 2>/dev/null || true)"
+    [[ -n "$nic" ]] || die "VM $VM has no network interface"
+    nsg="$(az network nic show --ids "$nic" --query networkSecurityGroup.id -o tsv 2>/dev/null || true)"
+    nsg="$(tr '[:upper:]' '[:lower:]' <<< "$nsg")"
+    local want
+    want="$(tr '[:upper:]' '[:lower:]' <<< "/resourceGroups/$RG/providers/Microsoft.Network/networkSecurityGroups/$VM-nsg")"
+    [[ "$nsg" == *"$want" ]] \
+        || die "VM $VM's network interface is not bound to the NSG $VM-nsg (it has: '${nsg:-none}'). Its ports may not be what this script set. Check with: az network nic show --ids $nic --query networkSecurityGroup.id, then fix it or run --destroy and start over."
+    info "network interface uses NSG $VM-nsg"
 }
 
 # az vm create tags the VM, NIC and VNet, but not the OS disk; tag everything in the group.
@@ -418,18 +455,42 @@ read_address() {
 
 SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30)
 
+# A new VM has new host keys. A VM created earlier under the same name and address left
+# its old keys in known_hosts, and ssh would refuse the new ones; forget them first.
+# Never for a reused VM: its keys are the ones already trusted.
+forget_host_keys() {
+    (( VM_CREATED )) || return 0
+    log "New VM: forgetting old SSH host keys for $FQDN and $PUBLIC_IP"
+    local h
+    for h in "$FQDN" "$PUBLIC_IP"; do
+        if (( DRY_RUN )); then
+            info "[dry-run] ssh-keygen -R $h"
+        else
+            info "+ ssh-keygen -R $h"
+            ssh-keygen -R "$h" >/dev/null 2>&1 || true   # fine when there is no old key
+        fi
+    done
+}
+
+host_key_hint() {
+    printf 'ssh-keygen -R %s; ssh-keygen -R %s' "$FQDN" "$PUBLIC_IP"
+}
+
 wait_for_ssh() {
     log "Waiting for SSH on $ADMIN@$FQDN"
     if (( DRY_RUN )); then
-        info "[dry-run] $(printf '%q ' ssh "${SSH_ID_ARGS[@]}" "${SSH_OPTS[@]}" -o BatchMode=yes -o ConnectTimeout=5 "$ADMIN@$FQDN" true)(retried for up to 5 minutes)"
+        info "[dry-run] $(printf '%q ' ssh ${SSH_ID_ARGS[@]+"${SSH_ID_ARGS[@]}"} "${SSH_OPTS[@]}" -o BatchMode=yes -o ConnectTimeout=5 "$ADMIN@$FQDN" true)(retried for up to 5 minutes)"
         return
     fi
-    local i
+    local i err
     for i in $(seq 1 60); do
-        if ssh "${SSH_ID_ARGS[@]}" "${SSH_OPTS[@]}" -o BatchMode=yes -o ConnectTimeout=5 \
-                "$ADMIN@$FQDN" true 2>/dev/null; then
+        if err="$(ssh ${SSH_ID_ARGS[@]+"${SSH_ID_ARGS[@]}"} "${SSH_OPTS[@]}" -o BatchMode=yes -o ConnectTimeout=5 \
+                "$ADMIN@$FQDN" true 2>&1 >/dev/null)"; then
             info "SSH is up"
             return
+        fi
+        if [[ "$err" == *"IDENTIFICATION HAS CHANGED"* || "$err" == *"Host key verification failed"* ]]; then
+            die "SSH refused $FQDN's host key: known_hosts has another key for this name or IP (a VM recreated under the same name?). If you just recreated the VM, remove the old keys and re-run: $(host_key_hint)"
         fi
         (( i % 6 )) || info "still waiting ($(( i * 5 ))s)..."
         sleep 5
@@ -503,7 +564,7 @@ remote_install() {
     log "Installing Solya on the VM (deploy/ec2/setup.sh)"
     local args=("$FQDN" "$PUBLIC_IP" "$SOLYA_SUBNET_VALUE" "$REPO_URL" "$BRANCH")
     if (( DRY_RUN )); then
-        info "[dry-run] $(printf '%q ' ssh "${SSH_ID_ARGS[@]}" "${SSH_OPTS[@]}" "$ADMIN@$FQDN" bash -s -- "${args[@]}")<<'REMOTE'"
+        info "[dry-run] $(printf '%q ' ssh ${SSH_ID_ARGS[@]+"${SSH_ID_ARGS[@]}"} "${SSH_OPTS[@]}" "$ADMIN@$FQDN" bash -s -- "${args[@]}")<<'REMOTE'"
         # shellcheck disable=SC2001  # indent every line
         sed 's/^/      | /' <<< "$REMOTE_SCRIPT"
         info "REMOTE"
@@ -511,13 +572,15 @@ remote_install() {
     fi
     # The arguments are quoted here, on purpose, for the remote shell.
     # shellcheck disable=SC2029
-    ssh "${SSH_ID_ARGS[@]}" "${SSH_OPTS[@]}" "$ADMIN@$FQDN" \
-        "bash -s -- $(printf '%q ' "${args[@]}")" <<< "$REMOTE_SCRIPT"
+    ssh ${SSH_ID_ARGS[@]+"${SSH_ID_ARGS[@]}"} "${SSH_OPTS[@]}" "$ADMIN@$FQDN" \
+        "bash -s -- $(printf '%q ' "${args[@]}")" <<< "$REMOTE_SCRIPT" \
+        || die "the install over SSH failed (see above). If ssh reported a changed host key, remove the old keys and re-run: $(host_key_hint)"
 }
 
 summary() {
-    local url="https://$FQDN" ssh_cmd
-    ssh_cmd="ssh ${SSH_ID_ARGS[*]:+${SSH_ID_ARGS[*]} }$ADMIN@$FQDN"
+    local url="https://$FQDN" ssh_cmd id_args=""
+    (( ${#SSH_ID_ARGS[@]} == 0 )) || id_args="${SSH_ID_ARGS[*]} "
+    ssh_cmd="ssh $id_args$ADMIN@$FQDN"
     log "Done"
     cat <<EOF
     Host (FQDN):   $FQDN   (public IP $PUBLIC_IP)
@@ -542,7 +605,7 @@ summary() {
       Leave PUBLIC_BASE_URL, TOKEN_ENCRYPTION_KEY and the SOLYA_*/COMPOSE_* keys as written.
 
     Edit, then apply (re-runs setup.sh; or simply re-run this script):
-      ssh -t ${SSH_ID_ARGS[*]:+${SSH_ID_ARGS[*]} }$ADMIN@$FQDN nano /opt/solya/.env
+      ssh -t $id_args$ADMIN@$FQDN nano /opt/solya/.env
       $ssh_cmd /opt/solya/deploy/ec2/setup.sh --ip $PUBLIC_IP
 
     Then create the invite:
@@ -560,6 +623,7 @@ destroy() {
         info "resource group $RG does not exist; nothing to delete"
         return
     fi
+    require_solya_group delete
     info "resources in $RG:"
     azq resource list -g "$RG" --query '[].[type, name]' -o tsv | sed 's/^/      /' || true
     if (( DRY_RUN )); then
@@ -584,7 +648,7 @@ destroy() {
 # ----------------------------------------------------------------------------- main
 
 main() {
-    parse_args "$@"
+    parse_args ${1+"$@"}
     (( DRY_RUN )) && log "DRY RUN: printing planned actions only"
     check_tools
     set_ssh_identity
@@ -602,9 +666,10 @@ main() {
     tag_all
     read_address
 
+    forget_host_keys
     wait_for_ssh
     remote_install
     summary
 }
 
-main "$@"
+main ${1+"$@"}

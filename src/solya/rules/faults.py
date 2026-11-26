@@ -1,6 +1,7 @@
 """Fault detection (pure) and fault record lifecycle (DB)."""
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -26,6 +27,12 @@ class DetectedFault:
     code: str
     serial: str | None
     first_seen: datetime
+    # Source-specific figures for the alert text (JSON), e.g. weak production's days/pct.
+    detail: str | None = None
+
+
+# Evaluated by its own evening check (rules/weak.py), never by a pull's detection.
+SEPARATE_SOURCES = frozenset({"weak"})
 
 
 @dataclass(frozen=True)
@@ -48,8 +55,17 @@ def detect_faults(
     is_daylight: bool,
     kind: str,
     stale_after_minutes: int = 60,
+    min_fault_samples: int = 2,
+    open_mode_serials: Collection[str] = (),
 ) -> list[DetectedFault] | None:
     """Faults visible in one pull. ``is_daylight`` is decided by the caller.
+
+    An inverter fault mode counts only when at least ``min_fault_samples`` hourly
+    samples of the window were a fault mode (FAULT_MIN_SAMPLES): one sample is a blip.
+    The gate applies to opening only: for a serial in ``open_mode_serials`` (its mode
+    fault is already open) one fault sample keeps it detected, so an early window with a
+    single sample never falsely closes it.
+    SolarEdge alerts, a missing inverter and zero production are not gated.
 
     Returns None when the site is stale or unknown: no inference is possible, so the
     caller must skip ``sync_faults`` and leave open faults open.
@@ -81,10 +97,11 @@ def detect_faults(
         for serial, state in bundle.inverters.items():
             # R24: any fault sample in the window (midnight to now), not only the last.
             # The detection time stays the pull time (acceptance a7).
-            mode = state.fault_mode
+            mode, samples = state.fault_mode, state.fault_samples
             if mode is None and is_fault_mode(state.last_mode):
-                mode = state.last_mode
-            if mode is not None:
+                mode, samples = state.last_mode, max(samples, 1)
+            needed = 1 if serial in open_mode_serials else min_fault_samples
+            if mode is not None and samples >= needed:
                 found.append(DetectedFault(f"mode:{serial}", "mode", mode, serial, now))
         if is_daylight:
             for serial in expected_inverters:
@@ -116,9 +133,14 @@ def sync_faults(
     detected: list[DetectedFault],
     now: datetime,
     data_complete: bool,
+    source: str | None = None,
 ) -> list[FaultEvent]:
     """Reconcile detected faults with stored records. A closed fault seen again opens a
-    new episode under a new key (R13); a closed key itself is never reopened."""
+    new episode under a new key (R13); a closed key itself is never reopened.
+
+    ``source`` None reconciles a pull's detection: it never closes a record of a
+    separately evaluated source (weak production). A ``source`` name closes only that
+    source's records."""
     rows = session.scalars(select(FaultRecord).where(FaultRecord.site_id == site_id)).all()
     keys = {r.key for r in rows}
     open_bases = {_base(r.key) for r in rows if r.closed_at is None}
@@ -143,15 +165,19 @@ def sync_faults(
             code=d.code,
             serial=d.serial,
             first_seen=d.first_seen,
+            detail=d.detail,
         )
         session.add(rec)
         keys.add(key)
         open_bases.add(base)
         events.append(NewFault(rec))
 
+    def managed(rec: FaultRecord) -> bool:
+        return rec.source == source if source is not None else rec.source not in SEPARATE_SOURCES
+
     if data_complete:
         for rec in rows:
-            if rec.closed_at is None and _base(rec.key) not in detected_bases:
+            if rec.closed_at is None and managed(rec) and _base(rec.key) not in detected_bases:
                 rec.closed_at = now
                 if rec.notified_at is not None:
                     events.append(ClosedFault(rec))
@@ -160,13 +186,27 @@ def sync_faults(
     return events
 
 
+def open_mode_serials(session: Session, site_id: int) -> set[str]:
+    """Serials with an open inverter-mode fault: detection keeps them on one sample."""
+    return set(
+        session.scalars(
+            select(FaultRecord.serial).where(
+                FaultRecord.site_id == site_id,
+                FaultRecord.source == "mode",
+                FaultRecord.closed_at.is_(None),
+                FaultRecord.serial.is_not(None),
+            )
+        ).all()
+    )
+
+
 def open_fault_views(session: Session, site_id: int) -> list[FaultView]:
     rows = session.scalars(
         select(FaultRecord)
         .where(FaultRecord.site_id == site_id, FaultRecord.closed_at.is_(None))
         .order_by(FaultRecord.first_seen, FaultRecord.id)
     ).all()
-    return [FaultView(r.code, r.serial, r.first_seen, r.source) for r in rows]
+    return [FaultView(r.code, r.serial, r.first_seen, r.source, r.detail) for r in rows]
 
 
 def ack_owner_faults(session: Session, owner_id: int, now: datetime) -> int:

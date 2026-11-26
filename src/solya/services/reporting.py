@@ -33,9 +33,11 @@ from solya.rules.faults import (
     detect_faults,
     due_reminders,
     open_fault_views,
+    open_mode_serials,
     sync_faults,
 )
 from solya.rules.ray import RayCalculator, weighted_ray
+from solya.rules.weak import WEAK_SOURCE, sync_weak
 from solya.scheduler import is_daylight
 from solya.services.backfill import backfill_history, backfill_month
 from solya.services.onboarding import create_connect_request
@@ -76,7 +78,7 @@ def owner_chat(owner: Owner) -> str | None:
 
 
 def _view(rec: FaultRecord) -> FaultView:
-    return FaultView(rec.code, rec.serial, rec.first_seen, rec.source)
+    return FaultView(rec.code, rec.serial, rec.first_seen, rec.source, rec.detail)
 
 
 def _owner_sites(session: Session, owner_id: int, monitored_only: bool = False) -> list[Site]:
@@ -364,7 +366,8 @@ class Reporter:
             # leave its faults and comm state as they are and tell nobody.
             monitored = site.monitored
             detected = detect_faults(
-                bundle, list(site.expected_inverters or []), now, daylight, kind, stale_after
+                bundle, list(site.expected_inverters or []), now, daylight, kind, stale_after,
+                self._settings.fault_min_samples, open_mode_serials(s, site_id),
             ) if monitored else None
             if detected is not None:  # R12: stale data never touches fault records
                 # A silent pull never closes faults: it could not send the follow-up, and
@@ -383,6 +386,10 @@ class Reporter:
                 as_of = (bundle.site.last_update_time if bundle.site is not None else None) or bundle.pulled_at
                 persist_site_day(s, day, local_date, lifetime_wh, as_of, computed_at=now)
                 no_data = monitored and day.state == "no_data"
+                # Weak production: once per evening, right after tonight's RAY. Only a
+                # fresh, complete day is evaluated; a silent pull never closes it.
+                if monitored and day.state == "ok":
+                    events += sync_weak(s, site_id, local_date, now, self._settings, notify)
 
             if not monitored:
                 return [], no_data
@@ -410,6 +417,8 @@ class Reporter:
                     rec = ev.record
                     if rec.source == "alert":  # SolarEdge itself closed the alert
                         text = he.fault_closed(name, _view(rec), local_now)
+                    elif rec.source == WEAK_SOURCE:  # a counted day back at WEAK_RECOVER
+                        text = he.weak_recovered(name, fault_label, local_now)
                     elif rec.serial:  # R24: our own detection cleared; never "SolarEdge closed"
                         text = he.inverter_recovered(name, rec.serial, local_now)
                     else:  # ZERO_PRODUCTION: no inverter to name, close silently
@@ -532,8 +541,10 @@ class Reporter:
                     if owner is not None and owner.telegram_chat_id is None:
                         _skip_unlinked(f"reminder for fault {rec.id}", owner.id)
                     continue
+                count = len(_owner_sites(s, owner.id, monitored_only=True))
                 text = he.fault_reminder(
-                    owner.display_name, _view(rec), now.astimezone(ZoneInfo(site.tz))
+                    owner.display_name, _view(rec), now.astimezone(ZoneInfo(site.tz)),
+                    label=effective_label(site, count),
                 )
                 msg = OutboundMessage(
                     chat, "fault", text, None,

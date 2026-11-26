@@ -31,6 +31,7 @@ class FaultView:
     serial: str | None
     first_seen: datetime
     source: str
+    detail: str | None = None
 
 
 @dataclass

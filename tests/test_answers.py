@@ -148,3 +148,25 @@ def test_new_routes_and_existing_unchanged():
     assert a.route_text("אתמול") == "yesterday"
     assert a.route_text("החודש") == "month"
     assert a.route_text("התראות") == "alerts"
+
+
+@pytest.mark.parametrize("text,route", [
+    ("כמה ייצרה המערכת השנייה היום?", "today"),
+    ("כמה ייצרה המערכת השנייה אתמול?", "yesterday"),
+    ("כמה ייצרה המערכת השניה החודש?", "month"),
+    ("יש התראות במערכת השנייה?", "alerts"),
+    ("יש תקלה בעוד מערכת?", "alerts"),
+    ("תחבר את המערכת השנייה", "connect"),
+    ("תחברי לי את המערכת השנייה היום", "connect"),
+    ("חבר את המערכת הנוספת", "connect"),
+    ("המערכת השנייה שלי", "connect"),
+    ("יש לי עוד מערכת", "connect"),
+])
+def test_second_system_question_routes_to_the_question(text, route):
+    """A connect verb always connects; the noun alone connects only when the text asks
+    no today/yesterday/month/alerts question."""
+    assert a.route_text(text) == route
+
+
+def test_friend_company_words_do_not_connect():
+    assert a.route_text("חברת החשמל") == "help"

@@ -120,6 +120,14 @@ def test_parse_inverter_status_any_fault_sample():
     assert st.last_mode == "SLEEPING"
     assert st.fault_mode == "LOCKED_GRID"
     assert st.fault_at == datetime(2026, 11, 24, 9, 0, tzinfo=timezone.utc)
+    assert st.fault_samples == 2  # LOCKED_GRID and FAULT: two hourly fault samples
+
+
+def test_parse_inverter_status_counts_fault_samples(load_fixture):
+    st = parse.parse_inverter_status(load_fixture("solaredge/inverters_status_fault.json"), TZ)
+    assert st["7E04E44D-B3"].fault_samples == 1
+    st = parse.parse_inverter_status(load_fixture("solaredge/inverters_status_ok.json"), TZ)
+    assert all(s.fault_samples == 0 for s in st.values())
 
 
 def test_parse_inverter_status_no_fault_sample(load_fixture):

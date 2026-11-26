@@ -14,8 +14,9 @@ once ``/energy`` answered 200 for a request whose ``from`` starts in the range's
 for an export-basis site with export requested, the meter answered 200 or 404 (no meter)
 for that range. A failed call is not credited and is retried at the next start; a retry
 after a failed meter call reuses the stored ``/energy`` answer for that range instead of
-paying for it again. For an export-basis site a failed meter call writes no rows. A
-month before the site was installed answers with empty values: no rows, still tried.
+paying for it again (it covers only the earlier try's days; the days after it are the
+evening pulls', as after any first try). For an export-basis site a failed meter call
+writes no rows. A month before the site was installed answers with empty values: no rows, still tried.
 """
 from __future__ import annotations
 
@@ -183,6 +184,11 @@ async def backfill_range(
             return 0
 
     if energy_body is not _NONE:  # an earlier try this month got it: no second credit
+        # The stored answer covers only the earlier try's range (to its "yesterday"), so
+        # a retry on a later day writes nothing after that. Not a hole: from the day of
+        # the first try on, each day's row is the evening pull's (it runs at sunset every
+        # day and owns that day's row), exactly as after a first try that succeeded. A
+        # fresh /energy call here would only spend this month's credit a second time.
         production = parse_energy_daily(energy_body, tz)
     else:
         production = await client.get_energy_daily(site_id, first, last, tz, priority="optional")
