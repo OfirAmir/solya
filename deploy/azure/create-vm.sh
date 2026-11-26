@@ -378,6 +378,7 @@ ensure_vm() {
             info "power state: $state; starting it"
             run az vm start -g "$RG" -n "$VM" -o none
         fi
+        check_nic_nsg  # a reused VM's NIC may have been rebound since it was created
         return
     fi
     pick_ssh_key
@@ -395,8 +396,9 @@ ensure_vm() {
     check_nic_nsg
 }
 
-# The new VM's NIC must use our NSG (80/443 open, 22 from your addresses only). If az
-# bound another one, or none, stop: the VM's exposure would not be what this script set.
+# The VM's NIC (new or reused) must use our NSG (80/443 open, 22 from your addresses only).
+# If it is bound to another one, or none, stop: the VM's exposure would not be what this
+# script set. Read-only: it never changes the NIC.
 check_nic_nsg() {
     if (( DRY_RUN )); then
         info "[dry-run] check that the VM's NIC uses the NSG $VM-nsg"

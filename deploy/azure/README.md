@@ -32,7 +32,7 @@ It then creates each of the following, skipping any that already exist. Every re
 | --- | --- | --- |
 | Resource group | `solya-rg` | in `israelcentral` |
 | Public IP | `solya-vm-ip` | Standard SKU, static, DNS label `solya-<6 random chars>` |
-| Network security group | `solya-vm-nsg` | inbound TCP 80 and 443 from `Internet`; TCP 22 from your current public IPv4 only. **Port 8000 is never opened.** The VM is created with `--nsg-rule NONE`, so az adds no rule of its own, and the script then checks that the VM's network interface uses this NSG. |
+| Network security group | `solya-vm-nsg` | inbound TCP 80 and 443 from `Internet`; TCP 22 from your current public IPv4 only. **Port 8000 is never opened.** The VM is created with `--nsg-rule NONE`, so az adds no rule of its own, and the script then checks that the VM's network interface uses this NSG (also when it reuses an existing VM). |
 | VM | `solya-vm` | `Standard_B1ms`, `Canonical:ubuntu-24_04-lts:server:latest`, user `azureuser` |
 | VNet and subnet | `solya-vm-vnet`, `solya-vm-subnet` | `10.10.0.0/16` and `10.10.0.0/24` |
 
@@ -130,7 +130,7 @@ It refuses a resource group that is not tagged `app=solya`. Otherwise it lists t
   ssh-keygen -R <fqdn>; ssh-keygen -R <public ip>
   ```
 - **"resource group ... is not tagged app=solya".** The group exists but was not made by this script, so it may hold other resources. The script will neither use nor `--destroy` it. Pick another name with `--resource-group`. If the group really is Solya's, tag it first: `az group update -n <rg> --set tags.app=solya`.
-- **"network interface is not bound to the NSG".** After creating the VM, the script checks that its NIC uses `solya-vm-nsg`. If not, the VM's open ports are not the ones the script set. Check with `az network nic show --ids <nic id> --query networkSecurityGroup.id`, and fix it, or run `--destroy` and start over.
+- **"network interface is not bound to the NSG".** After creating the VM, and when it reuses an existing one, the script checks that its NIC uses `solya-vm-nsg`. If not, the VM's open ports are not the ones the script set. Check with `az network nic show --ids <nic id> --query networkSecurityGroup.id`, and fix it, or run `--destroy` and start over.
 - **macOS.** The script runs with the bash 3.2 that macOS ships (`/bin/bash`); no newer bash is needed.
 - **The size is not available.** Pick one of the listed sizes with `--size`, or use another region with `--location`.
 - **`setup.sh` stops on a check.** Read its message, and see Troubleshooting in `deploy/ec2/README.md`. Without `--ip` it stops with "could not read the public IPv4 from EC2 metadata". On Azure that is expected: pass `--ip`.
