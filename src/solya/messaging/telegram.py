@@ -45,11 +45,15 @@ class TelegramChannel:
     async def send(self, msg: OutboundMessage) -> SendResult:
         chat_id = int(msg.recipient)
         try:
-            if msg.image_png is not None:
-                await self._bot.send_photo(chat_id=chat_id, photo=msg.image_png)
-            if msg.text:
-                for part in split_text(msg.text):
-                    await self._bot.send_message(chat_id=chat_id, text=part)
+            # msg.text is already final (post rtl_text), so this length is what Telegram counts.
+            if msg.image_png is not None and msg.text and len(msg.text) <= self.caption_limit:
+                await self._bot.send_photo(chat_id=chat_id, photo=msg.image_png, caption=msg.text)
+            else:
+                if msg.image_png is not None:
+                    await self._bot.send_photo(chat_id=chat_id, photo=msg.image_png)
+                if msg.text:
+                    for part in split_text(msg.text):
+                        await self._bot.send_message(chat_id=chat_id, text=part)
         except TgRetryAfter as e:
             ra = e.retry_after
             seconds = ra.total_seconds() if isinstance(ra, timedelta) else float(ra)
