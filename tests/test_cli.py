@@ -338,7 +338,7 @@ def test_pull_notify_rejected_token_not_printed(cfg, factory, monkeypatch, capsy
 
 # ------------------------------------------------------------------- RAY tools
 
-RAY_COLUMNS = ["date", "ray", "perf", "perf_ratio", "hist_sub", "health", "env",
+RAY_COLUMNS = ["date", "actual_kwh", "ray", "perf", "perf_ratio", "hist_sub", "health", "env",
                "expected_wh", "expected_source", "cv", "cloud_pct", "tmax_c", "pm10",
                "confidence"]
 HIST_FC = "https://historical-forecast-api.open-meteo.com/v1/forecast"
@@ -361,10 +361,14 @@ def _ray_rows(factory):
 def test_ray_show_prints_every_column_newest_first(cfg, factory, capsys):
     seed_sites(factory)
     _ray_rows(factory)
+    with session_scope(factory) as s:
+        s.add(DailyMetric(site_id=HOME, local_date=DAY, production_wh=40050.0,
+                          comm_state="ok", as_of=FETCHED, computed_at=FETCHED))
     assert run(cfg, "ray", "show", "--site", str(HOME), "--date", "2026-11-24") == 0
     out = capsys.readouterr().out.splitlines()
     assert out[0].split() == RAY_COLUMNS
-    assert out[1].split() == ["2026-11-24", "71.0", "0.81", "0.92", "0.88", "0.77", "0.66",
+    assert out[2].split()[1] == "-"  # no production row for 23.11
+    assert out[1].split() == ["2026-11-24", "40.05", "71.0", "0.81", "0.92", "0.88", "0.77", "0.66",
                               "33333.0", "history", "0.123", "12.5", "24.5", "31.5", "normal"]
     assert out[2].startswith("2026-11-23") and out[2].split()[-1] == "low"
 

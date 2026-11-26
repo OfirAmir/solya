@@ -395,9 +395,16 @@ RAY_COLUMNS = [
 HISTORICAL_FORECAST_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
 
 
-def _ray_table(rows: list[RayDaily]) -> None:
-    _table(["date"] + RAY_COLUMNS,
-           [[r.local_date] + [getattr(r, c) for c in RAY_COLUMNS] for r in rows])
+def _ray_table(s: Session, rows: list[RayDaily]) -> None:
+    """One line per day: the day's actual production (kWh) and every RAY component."""
+    def actual_kwh(r: RayDaily) -> str | None:
+        metric = s.get(DailyMetric, (r.site_id, r.local_date))
+        if metric is None or metric.production_wh is None:
+            return None
+        return f"{metric.production_wh / 1000:.2f}"
+
+    _table(["date", "actual_kwh"] + RAY_COLUMNS,
+           [[r.local_date, actual_kwh(r)] + [getattr(r, c) for c in RAY_COLUMNS] for r in rows])
 
 
 def cmd_ray_show(args, settings: Settings, clock: Clock) -> int:
@@ -408,7 +415,7 @@ def cmd_ray_show(args, settings: Settings, clock: Clock) -> int:
             q = q.where(RayDaily.local_date <= args.date,
                         RayDaily.local_date > args.date - timedelta(days=args.days))
         rows = s.scalars(q.order_by(RayDaily.local_date.desc()).limit(args.days)).all()
-        _ray_table(rows)
+        _ray_table(s, rows)
     return 0
 
 
@@ -459,7 +466,7 @@ def cmd_ray_recompute(args, settings: Settings, clock: Clock) -> int:
             print(f"RAY not computed: {reason}; any stored row for the day was removed")
             return 0
         metric.ray = ray  # daily_metrics.ray agrees with ray_daily
-        _ray_table([s.get(RayDaily, (args.site, args.date))])
+        _ray_table(s, [s.get(RayDaily, (args.site, args.date))])
     return 0
 
 
