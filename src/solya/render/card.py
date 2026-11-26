@@ -8,7 +8,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, features
 
-from solya.rules.ray import ray_band
+from solya.rules.ray import display_ray, ray_band
 from solya.text.he import fmt_ils, fmt_kwh
 
 RAY_COLORS = {"green": "#2E9E5B", "orange": "#F28C28", "yellow": "#E6C229", "red": "#D64545"}
@@ -92,8 +92,9 @@ def _draw_row(draw: ImageDraw.ImageDraw, y: int, row: CardRow, fonts, bold: bool
     if row.ray is not None:
         # small band-coloured score in the middle of the row, labelled "RAY"
         cx = WIDTH // 2
-        draw.text((cx, base + 28), str(round(row.ray)), font=_font(56, 700),
-                  fill=RAY_COLORS[ray_band(row.ray)], anchor="mm")
+        shown = display_ray(row.ray)
+        draw.text((cx, base + 28), str(shown), font=_font(56, 700),
+                  fill=RAY_COLORS[ray_band(shown)], anchor="mm")
         draw.text((cx, base + 84), "RAY", font=_font(24, 400), fill=GREY, anchor="mm")
     if row.production_wh is not None:
         _text(draw, (WIDTH - MARGIN, base), fmt_kwh(row.production_wh), big, INK, "ra")
@@ -125,8 +126,9 @@ def render_card(data: CardData) -> bytes:
     if data.ray is not None:
         cx, cy = RAY_CENTER[0], RAY_CENTER[1] + head
         r = RAY_DIAMETER // 2
-        draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=RAY_COLORS[ray_band(data.ray)])
-        draw.text((cx, cy), str(round(data.ray)), font=_font(110, 700), fill="#FFFFFF", anchor="mm")
+        shown = display_ray(data.ray)
+        draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=RAY_COLORS[ray_band(shown)])
+        draw.text((cx, cy), str(shown), font=_font(110, 700), fill="#FFFFFF", anchor="mm")
         _text(draw, (cx, cy + r + 28), RAY_CAPTION, _font(30, 400), GREY, "mm")
 
     y = top

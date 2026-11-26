@@ -51,3 +51,17 @@ def test_load_ray_passes_settings_when_accepted():
 
 def test_null_ray_ignores_actual_wh():
     assert NullRay().compute(None, None, None, actual_wh=5.0) is None
+
+
+@pytest.mark.parametrize("score,shown", [(89.5, 90), (90.5, 91), (79.5, 80), (90.15, 90), (89.49, 89), (0.5, 1)])
+def test_display_ray_rounds_half_up(score, shown):
+    from solya.rules.ray import display_ray
+
+    assert display_ray(score) == shown
+
+
+@pytest.mark.parametrize("score,band", [(89.5, "green"), (79.5, "orange"), (59.5, "yellow")])
+def test_band_follows_displayed_integer(score, band):
+    from solya.rules.ray import display_ray
+
+    assert ray_band(display_ray(score)) == band

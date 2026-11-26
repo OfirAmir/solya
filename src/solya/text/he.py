@@ -5,6 +5,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from solya.rules.daily import FaultView, SiteDay
+from solya.rules.ray import display_ray
 from solya.text.rtl import rtl_text
 
 WELCOME_1 = "ברוך הבא לסוליה ☀️ אני סול, הנציגה שלך. אני שומרת על המערכת הסולארית שלך וכאן בשבילך 24/7."
@@ -109,7 +110,7 @@ def daily_report(name: str, days: list[SiteDay], local_dt: datetime, show_total:
     for d in days:
         if d.state != "ok" or d.production_wh is None:
             continue
-        ray = f"RAY {int(round(d.ray))}, " if d.ray is not None else ""
+        ray = f"RAY {display_ray(d.ray)}, " if d.ray is not None else ""
         prefix = "" if d.open_faults else "אין התראות פעילות. "
         lines.append(f"{d.label}: {prefix}{ray}{_figures(d)}")
 
@@ -119,7 +120,7 @@ def daily_report(name: str, days: list[SiteDay], local_dt: datetime, show_total:
         incomes = [d.income_ils for d in shown if d.income_ils is not None]
         total = fmt_kwh(total_wh)
         if total_ray is not None:
-            total = f"RAY {int(round(total_ray))}, {total}"
+            total = f"RAY {display_ray(total_ray)}, {total}"
         if incomes and len(incomes) == len(shown):  # ₪ only when every site has income
             total += f", {fmt_ils(sum(incomes, Decimal('0')))} לפני מע״מ"
         lines.append(f"סה״כ: {total}")

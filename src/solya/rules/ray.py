@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib
 import inspect
 from datetime import date
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Literal, Protocol
 
 from sqlalchemy.orm import Session
@@ -53,7 +54,13 @@ def load_ray(path: str | None, settings: object | None = None) -> RayCalculator:
     return cls()
 
 
+def display_ray(score: float) -> int:
+    """RAY as shown to owners: rounded half-up to an integer (spec interpretation 6)."""
+    return int(Decimal(str(score)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
 def ray_band(score: float) -> RayBand:
+    """Band colour; callers pass the displayed integer (``display_ray``)."""
     if score >= 90:
         return "green"
     if score >= 80:

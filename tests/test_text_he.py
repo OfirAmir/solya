@@ -309,3 +309,10 @@ def test_total_line_mixed_tariffs_kwh_only():
     total = [line for line in out.split("\n") if line.startswith("סה״כ")]
     assert total == ["סה״כ: 388.5 קוט״ש"]
     assert "משק: אין התראות פעילות. 305.9 קוט״ש, הכנסה 137.64 ₪" in out
+
+
+def test_ray_text_rounds_half_up():
+    days = [ok_day("משק", 316990, "142.65", ray=90.5), ok_day("בית", 85000, "38.03", ray=88.0)]
+    out = he.daily_report("אורן", days, AT_1710, True, total_ray=89.5)
+    assert f"{RLM}RAY {RLM}91, " in out
+    assert f"סה״כ: {RLM}RAY {RLM}90, " in out
