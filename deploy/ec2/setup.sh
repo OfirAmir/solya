@@ -178,7 +178,10 @@ setup_sudo() {
         command -v sudo >/dev/null 2>&1 || die "sudo is not installed"
         SUDO="sudo"
         if (( ! DRY_RUN )); then
-            sudo -v || die "this user cannot sudo"
+            # Passwordless sudo first: on images where the user has NOPASSWD but is
+            # also in a password-required group (e.g. Azure's azureuser), `sudo -v`
+            # still asks for a password and fails without a terminal.
+            sudo -n true 2>/dev/null || sudo -v || die "this user cannot sudo"
         elif ! sudo -n true 2>/dev/null; then
             info "(sudo needs a password; dry-run skips the checks that need root)"
         fi

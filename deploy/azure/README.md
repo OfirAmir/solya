@@ -119,9 +119,9 @@ This lists the resources and asks you to type the resource group name, then dele
   - Check that the name resolves to the IP: `getent hosts <fqdn>`. A new DNS label can take a few minutes to resolve.
   - Then re-run `setup.sh`. Caddy retries by itself.
   - Logs: `/opt/solya/deploy/ec2/compose logs caddy`.
-- **SSH times out.** Your public IP has probably changed since the NSG rule was made. Re-run with your current IP, and the rule is updated in place:
+- **SSH times out.** Your public IP has probably changed since the NSG rule was made, or your connection leaves through more than one address (dual WAN, load balancing). By default the script asks api.ipify.org six times and allows every address it sees. Re-running it updates the rule in place. To set the addresses yourself, pass a comma-separated list. Each entry is an address or a /24–/32 range. The rule is set to exactly this list:
   ```bash
-  deploy/azure/create-vm.sh --ssh-source <your IPv4>
+  deploy/azure/create-vm.sh --ssh-source 203.0.113.10,198.51.100.20
   ```
 - **`REMOTE HOST IDENTIFICATION HAS CHANGED`.** The VM was recreated under the same name. Remove the old key with `ssh-keygen -R <fqdn>`.
 - **The size is not available.** Pick one of the listed sizes with `--size`, or use another region with `--location`.
