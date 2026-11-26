@@ -1,6 +1,7 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
+import pytest
 from sqlalchemy import inspect, select, text
 
 from solya.models import DailyMetric, FaultRecord, Owner, Site
@@ -131,6 +132,14 @@ def test_build_bot_application_registers_commands(settings, clock, db):
 def test_strip_marks():
     assert a.strip_marks("‎/connect‏ ﻿") == "/connect"
     assert a.strip_marks("‪שלום‬") == "שלום"
+
+
+@pytest.mark.parametrize("text", [
+    "תחבר את המערכת השנייה", "המערכת השנייה שלי", "המערכת השניה", "מערכת שנייה",
+])
+def test_connect_route_second_system_with_article(text):
+    """Final fix 8: "ה" may precede each word ("המערכת השנייה")."""
+    assert a.route_text(text) == "connect"
 
 
 def test_new_routes_and_existing_unchanged():

@@ -30,7 +30,8 @@ def strip_marks(text: str) -> str:
 
 
 _ROUTES: list[tuple[re.Pattern[str], Route]] = [
-    (re.compile("לחבר|תחבר|חיבור|מערכת נוספת|עוד מערכת|מערכת שני(?:ה|יה)"), "connect"),
+    # "ה" may precede each word: "המערכת השנייה"
+    (re.compile("לחבר|תחבר|חיבור|מערכת נוספת|עוד מערכת|ה?מערכת ה?שני(?:ה|יה)"), "connect"),
     (re.compile("הגדרות|תעריף"), "settings"),
     (re.compile("אתמול"), "yesterday"),
     (re.compile("התראות|התראה|תקלה"), "alerts"),

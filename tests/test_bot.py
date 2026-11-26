@@ -325,6 +325,22 @@ async def test_marked_command_dispatches(settings, clock, db):
     assert "https://solya.example/connect/" in msg.reply_text.call_args[0][0]
 
 
+async def test_marked_start_with_payload_redeems_invite(settings, clock, db):
+    """Final fix 9: a copied, direction-marked "/start <invite>" reaches the free-text dispatcher; the
+    payload after the command becomes context.args, as for the real command."""
+    h = _handlers(settings, clock, db)
+    with db() as s:
+        tok = ob.create_invite(s, "admin", NOW)
+        s.commit()
+    upd, ctx, msg = _upd(text=f"\u200e/start\u200e {tok}\u200f")
+    ctx.args = None  # what python-telegram-bot gives a MessageHandler
+    await h["__text__"](upd, ctx)
+    assert "הצטרפת" in msg.reply_text.call_args[0][0]
+    assert ctx.args == [tok]
+    with db() as s:
+        assert s.query(Owner).filter_by(telegram_chat_id=5).count() == 1
+
+
 async def test_free_text_connect_request(settings, clock, db):
     _owner(db)
     h = _handlers(settings, clock, db)

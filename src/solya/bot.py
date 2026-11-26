@@ -161,6 +161,8 @@ def build_bot_application(token: str, container) -> Application:
         text = answers.strip_marks(update.effective_message.text or "")
         m = _COMMAND_TEXT.match(text)
         if m and m.group(1).lower() in commands:
+            # as the real command: the words after it are its arguments (/start payload)
+            context.args = text.split()[1:]
             await commands[m.group(1).lower()](update, context)
             return
         route = answers.route_text(text)
