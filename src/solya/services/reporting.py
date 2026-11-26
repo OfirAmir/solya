@@ -37,7 +37,7 @@ from solya.rules.faults import (
 )
 from solya.rules.ray import RayCalculator, weighted_ray
 from solya.scheduler import is_daylight
-from solya.services.backfill import backfill_month
+from solya.services.backfill import backfill_history, backfill_month
 from solya.services.onboarding import create_connect_request
 from solya.services.site_settings import display_name
 from solya.solaredge.client import SolarEdgeClient
@@ -701,13 +701,22 @@ class Reporter:
     # -------------------------------------------------------------- backfill
 
     def backfill_soon(self, site_id: int) -> None:
-        """Run the month-to-date backfill for ``site_id`` in the background. Never raises
-        into the caller; failures are logged by exception type only."""
+        """Run the month-to-date backfill for ``site_id`` in the background, then (RAY
+        enabled) the history backfill. Never raises into the caller; failures are logged
+        by exception type only."""
         async def run() -> None:
             try:
                 await backfill_month(self._client, self._sf, site_id, self._clock.now())
             except Exception as e:
                 log.warning("backfill for site %s failed: %s", site_id, type(e).__name__)
+            if not self._settings.ray_implementation:
+                return
+            try:
+                await backfill_history(self._client, self._sf, site_id, self._clock.now())
+            except Exception as e:
+                log.warning(
+                    "history backfill for site %s failed: %s", site_id, type(e).__name__
+                )
 
         try:
             task = asyncio.get_running_loop().create_task(run())
