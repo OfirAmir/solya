@@ -108,8 +108,10 @@ def store_day(
     if row is None:
         row = WeatherDaily(site_id=site_id, local_date=local_date)
         session.add(row)
-    row.cloud_pct = day.cloud_pct
-    row.tmax_c = day.tmax_c
-    row.pm10 = day.pm10
+    # A field that failed this time keeps any value already stored.
+    for field in ("cloud_pct", "tmax_c", "pm10"):
+        value = getattr(day, field)
+        if value is not None or getattr(row, field) is None:
+            setattr(row, field, value)
     row.source = SOURCE
     row.fetched_at = now

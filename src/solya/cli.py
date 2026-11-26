@@ -435,9 +435,10 @@ def cmd_ray_recompute(args, settings: Settings, clock: Clock) -> int:
         if actual is None:
             reason = "no production stored for that day"
         else:
-            if s.get(WeatherDaily, (args.site, args.date)) is None:
+            stored = s.get(WeatherDaily, (args.site, args.date))
+            if stored is None or None in (stored.cloud_pct, stored.tmax_c, stored.pm10):
                 if site.lat is None or site.lon is None:
-                    reason = "no weather stored and the site has no coordinates"
+                    reason = "weather is missing or incomplete and the site has no coordinates"
                 else:
                     day = asyncio.run(fetch(site))
                     weather.store_day(s, args.site, args.date, day, clock.now())

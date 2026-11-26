@@ -455,3 +455,18 @@ def test_ray_recompute_missing_kwp_says_so(cfg, factory, capsys):
     assert "kWp" in capsys.readouterr().out
     with session_scope(factory) as s:
         assert s.get(RayDaily, (HOME, DAY)) is None
+
+
+@respx.mock
+def test_ray_recompute_refetches_incomplete_weather(cfg, factory, capsys):
+    from solya.models import RayDaily, WeatherDaily
+
+    _recompute_seed(factory)
+    with session_scope(factory) as s:
+        s.add(WeatherDaily(site_id=HOME, local_date=DAY, cloud_pct=20.0, tmax_c=22.0,
+                           pm10=None, source="open-meteo", fetched_at=FETCHED))
+    _mock_meteo()
+    assert run(cfg, "ray", "recompute", "--site", str(HOME), "--date", "2026-11-24") == 0
+    with session_scope(factory) as s:
+        assert s.get(WeatherDaily, (HOME, DAY)).pm10 == 30.0
+        assert s.get(RayDaily, (HOME, DAY)) is not None

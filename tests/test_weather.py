@@ -101,7 +101,8 @@ def test_store_day_upserts(db):
     with session_scope(db) as s:
         rows = list(s.scalars(select(WeatherDaily)))
         assert len(rows) == 1
-        assert (rows[0].cloud_pct, rows[0].tmax_c, rows[0].pm10) == (None, 25.0, None)
+        # a None from a failed re-fetch keeps the stored value; a new value replaces it
+        assert (rows[0].cloud_pct, rows[0].tmax_c, rows[0].pm10) == (10.0, 25.0, 30.0)
         assert rows[0].source == "open-meteo"
 
 
