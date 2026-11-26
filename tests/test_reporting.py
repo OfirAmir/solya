@@ -955,3 +955,21 @@ def test_weighted_ray_production_weights():
     assert weighted_ray([(90.0, 0.0), (80.0, 0.0)]) is None
     assert weighted_ray([(None, None)]) is None
     assert weighted_ray([(90.0, 300.0), (60.0, 100.0)]) == 82.5
+
+
+class _RaisingRay:
+    def compute(self, site, local_date, session, actual_wh=None):
+        raise ZeroDivisionError("secret detail")
+
+
+async def test_ray_failure_never_breaks_evening_pull(h, load_fixture, caplog):
+    h.reporter._ray = _RaisingRay()
+    await pull_both(h, load_fixture)
+    with session_scope(h.db) as s:
+        for sid in (FARM, HOME):
+            row = s.get(DailyMetric, (sid, DAY))
+            assert row is not None and row.production_wh is not None and row.ray is None
+    await h.reporter.evening_report(1, DAY)
+    assert h.channel.sent[-1].text == REGRESSION
+    assert "ZeroDivisionError" in caplog.text
+    assert "secret detail" not in caplog.text

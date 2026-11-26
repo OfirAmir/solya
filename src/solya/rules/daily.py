@@ -1,6 +1,7 @@
 """Daily per-site figures and state."""
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
@@ -14,6 +15,8 @@ from solya.ingest import PullBundle
 from solya.models import DailyMetric, Site
 from solya.rules.comms import is_stale
 from solya.rules.ray import RayCalculator
+
+log = logging.getLogger(__name__)
 
 SiteState = Literal["ok", "comm_loss", "no_data", "reauth_needed"]
 
@@ -121,7 +124,12 @@ def compute_site_day(
     if local_date is None:
         local_date = now.astimezone(ZoneInfo(site.tz)).date()
     # Today's row is not persisted yet: RAY gets today's production directly.
-    day.ray = ray.compute(site, local_date, session, actual_wh=overview.production_wh)
+    # RAY is best-effort (spec interpretation 7): a failure never costs the day's figures.
+    try:
+        day.ray = ray.compute(site, local_date, session, actual_wh=overview.production_wh)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("RAY failed for site %s: %s", site.se_site_id, type(exc).__name__)
+        day.ray = None
     return day
 
 
