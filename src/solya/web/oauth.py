@@ -161,6 +161,8 @@ async def oauth_callback(
             linked = owner.telegram_chat_id is not None
         already = previous_owner == new_owner
         await c.reporter.on_site_connected(sid, is_first, already=already)
+        if not already:
+            c.reporter.backfill_soon(sid)
         if previous_owner is not None and previous_owner != new_owner:
             await c.reporter.on_site_reassigned(sid, previous_owner, new_owner)
     except Exception as e:

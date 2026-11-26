@@ -19,6 +19,7 @@ from solya.config import Settings
 from solya.db import SessionFactory, session_scope
 from solya.models import Owner, Site
 from solya.rules.comms import sun_times
+from solya.services.site_settings import apply_name_defaults
 
 if TYPE_CHECKING:
     from solya.services.reporting import Reporter
@@ -29,6 +30,8 @@ MISFIRE_GRACE_SECONDS = 3600
 REMINDER_INTERVAL_MINUTES = 15
 # A report planned late (restart, re-plan) runs this long after its owner's late pulls.
 LATE_REPORT_DELAY = timedelta(minutes=5)
+# Name defaults and the month-to-date backfill run once, this long after start.
+STARTUP_JOB_DELAY = timedelta(minutes=1)
 
 JobKind = Literal["evening_pull", "evening_report", "midday_check"]
 
@@ -113,6 +116,11 @@ class SchedulerService:
             "send_reminders", IntervalTrigger(minutes=REMINDER_INTERVAL_MINUTES), "send_reminders"
         )
         self._add("keepalive", CronTrigger(hour=3, minute=0, timezone=self._tz), "keepalive")
+        self._add(
+            "startup_backfill",
+            DateTrigger(run_date=self._clock.now() + STARTUP_JOB_DELAY),
+            "startup_backfill",
+        )
         self.scheduler.start()
         self.plan_today()
 
@@ -161,6 +169,21 @@ class SchedulerService:
         scope = "" if owner_id is None else f" (owner {owner_id})"
         log.info("planned %d jobs for %s%s", len(specs), local_date, scope)
 
+    def startup_backfill(self) -> None:
+        """Once after start: default card names, then the month-to-date backfill for
+        every active, monitored site (each one a no-op if already tried this month)."""
+        with session_scope(self._factory) as s:
+            named = apply_name_defaults(s)
+            site_ids = list(s.scalars(
+                select(Site.se_site_id)
+                .where(Site.status == "active", Site.monitored.is_(True))
+                .order_by(Site.se_site_id)
+            ))
+        if named:
+            log.info("applied default card names to %d sites", named)
+        for site_id in site_ids:
+            self._reporter.backfill_soon(site_id)
+
     def plan_owner(self, owner_id: int) -> None:
         """R26: re-plan today's jobs for one owner, e.g. right after a site connects."""
         self.plan_today(owner_id)
@@ -196,6 +219,8 @@ class SchedulerService:
         try:
             if method == "plan_today":
                 self.plan_today()
+            elif method == "startup_backfill":
+                self.startup_backfill()
             else:
                 await getattr(self._reporter, method)(*args)
         except Exception:

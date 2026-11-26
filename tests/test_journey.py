@@ -920,3 +920,17 @@ def test_sites_post_unchanged_default_name_keeps_label_empty(tc, container):
     assert tc.post("/sites", data={**data, "name_111111": "בית"}).status_code == 303
     site = _site(container, 111111)
     assert (site.label_he, site.card_name) == ("בית", "בית")
+
+
+@respx.mock
+def test_callback_schedules_backfill(tc, container, load_fixture, monkeypatch):
+    seen = []
+    monkeypatch.setattr(container.reporter, "backfill_soon", seen.append)
+    owner_id = _web_owner(tc, container)
+    farm = load_fixture("solaredge/site_farm.json")
+    _callback(tc, container, owner_id, farm)
+    assert seen == [FARM_ID]
+    _callback(tc, container, owner_id, load_fixture("solaredge/site_home.json"))
+    assert seen == [FARM_ID, HOME_ID]
+    _callback(tc, container, owner_id, farm)  # re-approval of a site they already have
+    assert seen == [FARM_ID, HOME_ID]
