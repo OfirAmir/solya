@@ -301,3 +301,240 @@ async def test_backfill_production_meter_failure_keeps_production(db, client):
         e, m = mock_api()
         assert await backfill.backfill_month(client, db, SITE, NOW + timedelta(days=1)) == 0
         assert e.call_count == 0 and m.call_count == 0
+
+
+# ------------------------------------------------------------ RAY history backfill
+
+from solya.solaredge.units import day_window_utc  # noqa: E402
+
+
+def _from(d):
+    return day_window_utc(d, TZ)[0]
+
+
+def range_api(empty_before=None):
+    """/energy and meter answers covering exactly the requested range (by from/to)."""
+    def days_of(request):
+        q = request.url.params
+        start = datetime.fromisoformat(q["from"].replace("Z", "+00:00"))
+        end = datetime.fromisoformat(q["to"].replace("Z", "+00:00"))
+        from zoneinfo import ZoneInfo
+        zone = ZoneInfo(TZ)
+        d, last = start.astimezone(zone).date(), end.astimezone(zone).date()
+        out = []
+        while d < last:
+            if empty_before is None or d >= empty_before:
+                out.append(d)
+            d += timedelta(days=1)
+        return out
+
+    e = respx.get(f"{BASE}/sites/{SITE}/energy").mock(
+        side_effect=lambda req: httpx.Response(200, json=energy_body(days_of(req))))
+    m = respx.get(f"{BASE}/sites/{SITE}/meters/telemetry").mock(
+        side_effect=lambda req: httpx.Response(200, json=meter_body(days_of(req))))
+    return e, m
+
+
+def make_reporter(db, settings, clock, client, ray=True):
+    from solya.messaging.outbox import Outbox
+    from solya.rules.ray import NullRay
+    from solya.services.reporting import Reporter
+
+    from conftest import FakeChannel
+
+    if ray:
+        settings = settings.model_copy(update={"ray_implementation": "solya.rules.ray:NullRay"})
+    return Reporter(db, client, FakeTokens(), Outbox(db, clock), FakeChannel(), clock,
+                    settings, NullRay(), lambda sid, at: None)
+
+
+async def _drain(reporter):
+    while reporter._background:
+        await asyncio.gather(*list(reporter._background))
+
+
+async def test_ray_connect_fetches_current_previous_and_history_months(db, settings, clock, client):
+    seed(db, basis="export", tariff="0.48")
+    reporter = make_reporter(db, settings, clock, client)
+    priorities = []
+    acquire = client._budget.acquire
+
+    async def spy(site_id, endpoint, priority):
+        priorities.append(priority)
+        await acquire(site_id, endpoint, priority)
+
+    client._budget.acquire = spy
+    with respx.mock:
+        e, m = range_api()
+        reporter.backfill_soon(SITE)
+        await _drain(reporter)
+    froms = sorted(c.request.url.params["from"] for c in e.calls)
+    assert froms == sorted([_from(date(2026, 11, 1)), _from(date(2026, 10, 1)),
+                            _from(date(2025, 11, 1)), _from(date(2024, 11, 1))])
+    assert sorted(c.request.url.params["from"] for c in m.calls) == sorted(
+        [_from(date(2026, 11, 1)), _from(date(2026, 10, 1))])
+    tos = {c.request.url.params["from"]: c.request.url.params["to"] for c in e.calls}
+    assert tos[_from(date(2026, 10, 1))] == day_window_utc(date(2026, 10, 31), TZ)[1]
+    assert tos[_from(date(2025, 11, 1))] == day_window_utc(date(2025, 11, 30), TZ)[1]
+    got = rows(db)
+    assert len(got) == 25 + 31 + 30 + 30
+    assert date(2026, 11, 26) not in got
+    assert got[date(2026, 10, 5)].export_wh == 4000.0  # previous month: export for income
+    assert got[date(2026, 10, 5)].income_ils == Decimal("1.92")
+    assert got[date(2025, 11, 5)].export_wh is None  # history: production only
+    assert got[date(2025, 11, 5)].production_wh == 15000.0
+    assert all(r.comm_state == "backfill" for r in got.values())
+    assert len(credited(db)) == 6
+    assert priorities == ["optional"] * 6
+
+    with session_scope(db) as s:  # even with the rows gone, every range was tried
+        for r in s.scalars(select(DailyMetric)):
+            s.delete(r)
+    clock.advance(timedelta(days=2))
+    with respx.mock:
+        e, m = range_api()
+        reporter.backfill_soon(SITE)
+        await _drain(reporter)
+        assert e.call_count == 0 and m.call_count == 0
+    assert len(credited(db)) == 6
+
+
+async def test_ray_disabled_only_month_calls(db, settings, clock, client):
+    seed(db, basis="export", tariff="0.48")
+    reporter = make_reporter(db, settings, clock, client, ray=False)
+    with respx.mock:
+        e, m = range_api()
+        reporter.backfill_soon(SITE)
+        await _drain(reporter)
+        assert [c.request.url.params["from"] for c in e.calls] == [_from(date(2026, 11, 1))]
+        assert m.call_count == 1
+    assert len(credited(db)) == 2
+
+
+async def test_tried_memory_is_per_range(db, client):
+    seed(db)
+    with respx.mock:
+        range_api()
+        assert await backfill.backfill_month(client, db, SITE, NOW) == 25
+    with respx.mock:  # this month's stored 200 does not block the previous month
+        e, m = range_api()
+        n = await backfill.backfill_range(client, db, SITE, date(2026, 10, 1),
+                                          date(2026, 10, 31), NOW, with_export=False)
+        assert n == 31
+        assert e.call_count == 1 and m.call_count == 0
+        assert e.calls[0].request.url.params["from"] == _from(date(2026, 10, 1))
+    with respx.mock:  # and each is now tried
+        e, m = range_api()
+        assert await backfill.backfill_month(client, db, SITE, NOW) == 0
+        assert await backfill.backfill_range(client, db, SITE, date(2026, 10, 1),
+                                             date(2026, 10, 31), NOW, with_export=False) == 0
+        assert e.call_count == 0 and m.call_count == 0
+
+
+async def test_history_before_install_is_empty_but_tried(db, client):
+    seed(db)
+    with respx.mock:
+        e, m = range_api(empty_before=date(2026, 9, 1))  # installed in September 2026
+        n = await backfill.backfill_history(client, db, SITE, NOW)
+        assert n == 31  # October only; the year-old months answered empty
+        assert e.call_count == 3 and m.call_count == 0  # production basis: no meter
+    with respx.mock:
+        e, m = range_api()
+        assert await backfill.backfill_history(client, db, SITE, NOW + timedelta(days=1)) == 0
+        assert e.call_count == 0 and m.call_count == 0
+
+
+async def test_history_one_failed_month_does_not_block_others(db, client):
+    seed(db)
+    with respx.mock:
+        respx.get(f"{BASE}/sites/{SITE}/energy", params={"from": _from(date(2026, 10, 1))}).mock(
+            return_value=httpx.Response(500))
+        e, _ = range_api()
+        assert await backfill.backfill_history(client, db, SITE, NOW) == 60
+    with respx.mock:  # the failed month is retried, the others are not
+        e, _ = range_api()
+        assert await backfill.backfill_history(client, db, SITE, NOW + timedelta(hours=1)) == 31
+        assert [c.request.url.params["from"] for c in e.calls] == [_from(date(2026, 10, 1))]
+
+
+async def test_monthly_backfill_job_day_1_at_01_local(db, settings):
+    from solya.scheduler import SchedulerService
+
+    class FakeReporter:
+        def __init__(self):
+            self.calls = []
+
+        def backfill_soon(self, site_id):
+            self.calls.append(site_id)
+
+    seed(db)
+    with session_scope(db) as s:
+        s.add(Site(se_site_id=2, owner_id=1, portal_name="q", tz=TZ, monitored=False,
+                   status="active", created_at=NOW))
+        s.add(Site(se_site_id=4, owner_id=1, portal_name="r", tz=TZ, monitored=True,
+                   status="paused", created_at=NOW))
+    reporter = FakeReporter()
+    # APScheduler fires on the real wall clock: the fake clock sits two days ahead of it so
+    # the startup DateTrigger never fires during the test (as in test_scheduler.py).
+    day = datetime.now(timezone.utc).date() + timedelta(days=2)
+    svc = SchedulerService(reporter, db, settings, FixedClock(
+        datetime.combine(day, datetime.min.time(), timezone.utc)))
+    svc.start()
+    try:
+        job = svc.scheduler.get_job("monthly_backfill")
+        fields = {f.name: str(f) for f in job.trigger.fields}
+        assert (fields["day"], fields["hour"], fields["minute"]) == ("1", "1", "0")
+        assert str(job.trigger.timezone) == "Asia/Jerusalem"
+        nxt = job.next_run_time.astimezone(svc._tz)
+        assert (nxt.day, nxt.hour, nxt.minute) == (1, 1, 0)
+        assert job.args == ("monthly_backfill",)
+    finally:
+        svc.shutdown()
+    await svc._run("monthly_backfill")
+    assert reporter.calls == [SITE]
+
+
+async def test_backfill_soon_skips_while_running(db, settings, clock, client, caplog):
+    from solya.messaging.outbox import Outbox
+    from solya.rules.ray import NullRay
+    from solya.services.reporting import Reporter
+
+    from conftest import FakeChannel
+
+    seed(db)
+    reporter = Reporter(db, client, FakeTokens(), Outbox(db, clock), FakeChannel(), clock,
+                        settings, NullRay(), lambda sid, at: None)
+    with respx.mock:
+        e, m = mock_api()
+        with caplog.at_level(logging.INFO):
+            reporter.backfill_soon(SITE)
+            reporter.backfill_soon(SITE)  # still running: skipped
+            await asyncio.gather(*list(reporter._background))
+        assert e.call_count == 1 and m.call_count == 1
+        assert "already running" in caplog.text
+        reporter.backfill_soon(SITE)  # finished: a new call runs again (nothing left to fetch)
+        assert len(reporter._background) == 1
+        await asyncio.gather(*list(reporter._background))
+    assert len(rows(db)) == 25
+
+
+async def test_month_boundary_december_refetches_november_once(db, client, clock):
+    """November's month-to-date answer was fetched in November; in December the previous
+    month is a new range: its missing days are fetched once, then never again."""
+    seed(db)
+    with respx.mock:
+        range_api()
+        assert await backfill.backfill_month(client, db, SITE, NOW) == 25  # 1-25 Nov
+    dec = datetime(2026, 12, 3, 15, 0, tzinfo=timezone.utc)
+    clock.set(dec)
+    with respx.mock:
+        e, _ = range_api()
+        assert await backfill.backfill_history(client, db, SITE, dec) == 5 + 31 + 31
+        nov = [c for c in e.calls if c.request.url.params["from"] == _from(date(2026, 11, 1))]
+        assert len(nov) == 1
+    got = rows(db)
+    assert all(date(2026, 11, d) in got for d in range(1, 31))
+    with respx.mock:
+        e, m = range_api()
+        assert await backfill.backfill_history(client, db, SITE, dec + timedelta(days=1)) == 0
+        assert e.call_count == 0 and m.call_count == 0

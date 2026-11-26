@@ -86,7 +86,7 @@ def build_container(
     tokens = TokenManager(factory, settings, cipher, http, budget, clock, reauth)
     client = SolarEdgeClient(http, settings, tokens, budget, factory, clock)
     outbox = Outbox(factory, clock)
-    ray = load_ray(settings.ray_implementation)
+    ray = load_ray(settings.ray_implementation, settings, clock=clock)
 
     container = Container(
         settings=settings, clock=clock, session_factory=factory, cipher=cipher, http=http,
@@ -103,6 +103,7 @@ def build_container(
         factory, client, tokens, outbox, container.channel, clock, settings, ray,
         lambda sid, at: container.scheduler.schedule_retry(sid, at),
         replan_owner=lambda owner_id: container.scheduler.plan_owner(owner_id),
+        http=http,
     )
     container.scheduler = SchedulerService(container.reporter, factory, settings, clock)
     return container

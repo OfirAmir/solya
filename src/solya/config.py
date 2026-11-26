@@ -3,6 +3,7 @@ import hmac
 from functools import lru_cache
 
 import json
+import math
 from typing import Annotated
 
 from pydantic import AnyHttpUrl, SecretStr, field_validator
@@ -46,6 +47,22 @@ class Settings(BaseSettings):
     llm_api_key: SecretStr | None = None
     llm_model: str | None = None
     llm_monthly_tokens_per_owner: int = 50000
+    ray_visible: bool = False
+    # PVGIS monthly E_d (kWh/kWp/day), lat 32.1 lon 34.8, optimal tilt, 14% losses.
+    # Source: published PVGIS v5.2 figures for central Israel, recalled from
+    # knowledge (re.jrc.ec.europa.eu was unreachable from the build network),
+    # recorded 2026-11-26. Re-fetch from /api/v5_2/PVcalc when possible.
+    # Old table: 3.5, 4.5, 6.0, 7.5, 8.0, 7.2, 6.5, 6.5, 7.0, 7.5, 5.0, 3.5
+    ray_national_kwh_per_kwp_day: list[float] = [
+        3.75, 4.45, 5.35, 5.90, 6.10, 6.20, 6.20, 6.10, 5.75, 4.95, 3.95, 3.40,
+    ]
+
+    @field_validator("ray_national_kwh_per_kwp_day")
+    @classmethod
+    def _check_national_table(cls, v):
+        if len(v) != 12 or any(not math.isfinite(x) or x <= 0 for x in v):
+            raise ValueError("ray_national_kwh_per_kwp_day needs exactly 12 finite positive values")
+        return v
 
     @field_validator("trusted_proxies", mode="before")
     @classmethod

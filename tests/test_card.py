@@ -92,3 +92,33 @@ def test_render_total_kwh_only():
     im = Image.open(BytesIO(render_card(CardData(ray=None, rows=rows,
                                                  total=(402029.0, None)))))
     assert im.format == "PNG" and im.width == 1080
+
+
+def test_caption_and_row_ray_render():
+    import solya.render.card as c
+
+    assert c.RAY_CAPTION == "מדד RAY"
+    row = CardRow("אורן סופר", 316990.0, Decimal("142.65"), None, ray=91.0)
+    plain = _open(_data(ray=95, rows=[_row()]))
+    with_ray = _open(_data(ray=95, rows=[row]))
+    assert plain.size == with_ray.size
+    assert plain.tobytes() != with_ray.tobytes()
+
+
+def test_ray_band_from_displayed_integer():
+    # 89.5 is shown as 90, so the gauge is green, not orange
+    assert _near(_open(_data(ray=89.5)).getpixel((540, 85)), GREEN)
+
+
+def test_row_ray_band_from_displayed_integer():
+    from solya.render import card as card_mod
+
+    seen = []
+    orig = card_mod.ray_band
+    card_mod.ray_band = lambda s: (seen.append(s), orig(s))[1]
+    try:
+        row = CardRow("אורן", 316990.0, Decimal("142.65"), None, ray=79.5)
+        render_card(CardData(ray=None, rows=[row], total=None))
+    finally:
+        card_mod.ray_band = orig
+    assert seen == [80]

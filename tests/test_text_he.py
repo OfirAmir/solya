@@ -86,7 +86,7 @@ def test_report_with_fault_line_and_closing():
         f"מומלץ לפתוח קריאת שירות מול {RLM}SolarEdge או להזמין טכנאי מוסמך."
     )
     assert lines[2] == f"משק: {RLM}317.0 קוט״ש, הכנסה {RLM}142.65 ₪"
-    assert lines[-1] == "עדכן אותי ואעקוב עד לסיום הטיפול."
+    assert lines[-1] == "אני ממשיכה לעקוב ואעדכן אותך. איך תרצה להתקדם?"
 
 
 def test_fault_line_without_serial():
@@ -152,12 +152,12 @@ def test_every_line_starts_hebrew():
 def test_site_connected_portal_name_latin_gets_no_rlm_issue():
     # "Portal 1" follows Hebrew with a space, so it is RLM-prefixed per R2.
     assert he.site_connected("Portal 1") == (
-        f"המערכת {RLM}Portal {RLM}1 חוברה בהצלחה. יש לך עוד מערכת? שלחו /connect.")
+        f"המערכת {RLM}Portal {RLM}1 חוברה בהצלחה. יש לך עוד מערכת? שלח /connect.")
 
 
 def test_site_already_connected_exact():
     assert he.site_already_connected("משק") == (
-        f"המערכת משק כבר מחוברת. בחלון של {RLM}SolarEdge בחרו מערכת אחרת.")
+        f"המערכת משק כבר מחוברת. בחלון של {RLM}SolarEdge בחר מערכת אחרת.")
 
 
 def test_fault_alert_fan_exact():
@@ -169,7 +169,7 @@ def test_fault_alert_fan_exact():
         "ככל הנראה מדובר בתקלה במאוורר הקירור של הממיר. "
         "נדרשת בדיקה של איש מקצוע מוסמך לאבחון ולטיפול, ולא טיפול עצמי. "
         f"אני ממליצה לפתוח קריאת שירות מול {RLM}SolarEdge או להזמין טכנאי מוסמך. "
-        "עדכן אותי ואעקוב עד לסיום הטיפול."
+        "אני ממשיכה לעקוב ואעדכן אותך. איך תרצה להתקדם?"
     )
 
 
@@ -204,7 +204,7 @@ def test_reminder_and_closed_exact():
         "בוקר טוב אורן,\n"
         f"תזכורת, ההתראה {RLM}FAN_ALERT_1 בממיר {RLM}7E04E44D-B3 עדיין פתוחה. "
         f"אני ממליצה לפתוח קריאת שירות מול {RLM}SolarEdge או להזמין טכנאי מוסמך. "
-        "עדכן אותי ואעקוב עד לסיום הטיפול."
+        "אני ממשיכה לעקוב ואעדכן אותך. איך תרצה להתקדם?"
     )
     assert he.fault_closed("אורן", fault(), AT_0700) == (
         "בוקר טוב אורן,\n"
@@ -309,3 +309,21 @@ def test_total_line_mixed_tariffs_kwh_only():
     total = [line for line in out.split("\n") if line.startswith("סה״כ")]
     assert total == ["סה״כ: 388.5 קוט״ש"]
     assert "משק: אין התראות פעילות. 305.9 קוט״ש, הכנסה 137.64 ₪" in out
+
+
+def test_ray_text_rounds_half_up():
+    days = [ok_day("משק", 316990, "142.65", ray=90.5), ok_day("בית", 85000, "38.03", ray=88.0)]
+    out = he.daily_report("אורן", days, AT_1710, True, total_ray=89.5)
+    assert f"{RLM}RAY {RLM}91, " in out
+    assert f"סה״כ: {RLM}RAY {RLM}90, " in out
+
+
+def test_persona_copy():
+    from solya.text import he
+
+    assert "בינה מלאכותית" in he.WELCOME_1
+    assert he._FOLLOW_UP.endswith("איך תרצה להתקדם?")
+    assert "עדכן אותי" not in he._FOLLOW_UP
+    for text in (he.HELP, he.INVITE_OK, he.TARIFF_HINT, he.settings_link("https://x/s/t")):
+        for plural in ("שלחו", "פתחו", "הזינו"):
+            assert plural not in text

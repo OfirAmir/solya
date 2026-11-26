@@ -139,6 +139,7 @@ async def h(db, settings, clock):
             db, client, tokens, Outbox(db, clock), channel, clock, settings, NullRay(),
             lambda sid, at: retries.append((sid, at)),
             delay_send=lambda seconds, factory: delayed.append((seconds, factory)),
+            http=http,
         )
         box["reporter"] = reporter
         yield Harness(db, clock, channel, reporter, tokens, retries, delayed)
@@ -528,7 +529,7 @@ async def test_on_site_connected_welcomes(h):
     await h.reporter.on_site_connected(site, is_first=True)
 
     texts = [m.text for m in h.channel.sent]
-    connected = rtl_text("המערכת משק חוברה בהצלחה. יש לך עוד מערכת? שלחו /connect.")
+    connected = rtl_text("המערכת משק חוברה בהצלחה. יש לך עוד מערכת? שלח /connect.")
     assert texts == [connected, rtl_text(WELCOME_1)]
     assert f"{RLM}24/7" in texts[1]
     assert [seconds for seconds, _ in h.delayed] == [60]
@@ -544,7 +545,7 @@ async def test_on_site_connected_welcomes(h):
 async def test_on_site_connected_already_message(h):
     await h.reporter.on_site_connected(HOME, is_first=False, already=True)
     (msg,) = h.channel.sent
-    assert msg.text == rtl_text("המערכת בית כבר מחוברת. בחלון של SolarEdge בחרו מערכת אחרת.")
+    assert msg.text == rtl_text("המערכת בית כבר מחוברת. בחלון של SolarEdge בחר מערכת אחרת.")
     assert "\u200e" not in msg.text
     assert not h.delayed
 
@@ -552,7 +553,7 @@ async def test_on_site_connected_already_message(h):
 async def test_on_site_connected_command_has_no_direction_marks(h):
     await h.reporter.on_site_connected(HOME, is_first=False)
     (msg,) = h.channel.sent
-    assert msg.text.endswith("שלחו /connect.")
+    assert msg.text.endswith("שלח /connect.")
     assert "\u200f/connect" not in msg.text and "\u200e" not in msg.text
 
 
@@ -900,3 +901,92 @@ async def test_tariff_hint_weekly(h):
     assert he.TARIFF_HINT not in second.text.replace(RLM, "")
     with session_scope(h.db) as s:
         assert s.get(OutboxEntry, "tariff_hint:1:2026-W48") is not None
+
+
+D26 = date(2026, 11, 26)
+NOW26 = datetime(2026, 11, 26, 15, 5, tzinfo=timezone.utc)
+
+
+def _seed_ray_day(h, farm_ray=91.0, home_ray=92.0):
+    with session_scope(h.db) as s:
+        for sid, wh, ray in ((FARM, 310100.0, farm_ray), (HOME, 86600.0, home_ray)):
+            s.merge(DailyMetric(site_id=sid, local_date=D26, production_wh=wh, ray=ray,
+                                income_ils=Decimal("10.00"), comm_state="ok",
+                                as_of=NOW26, computed_at=NOW26))
+
+
+def _report26(h, visible, **kw):
+    _seed_ray_day(h, **kw)
+    h.reporter._settings.ray_visible = visible
+    with session_scope(h.db) as s:
+        return reporting.build_owner_report(s, 1, D26, NOW26, h.reporter._settings, NullRay())
+
+
+async def test_ray_hidden_when_not_visible(h):
+    card, text = _report26(h, False)
+    assert card.ray is None
+    assert all(r.ray is None for r in card.rows)
+    assert "RAY" not in text
+
+
+async def test_ray_visible_weighted_by_production(h):
+    card, text = _report26(h, True)
+    assert round(card.ray) == 91
+    assert [round(r.ray) for r in card.rows] == [91, 92]
+    assert text.replace(RLM, "").count("סה״כ: RAY 91, 396.7 קוט״ש") == 1
+
+
+async def test_ray_overall_skips_none_site(h):
+    card, _ = _report26(h, True, farm_ray=None, home_ray=92.0)
+    assert card.ray == 92.0
+    assert card.rows[0].ray is None
+
+
+async def test_ray_all_none_no_gauge(h):
+    card, text = _report26(h, True, farm_ray=None, home_ray=None)
+    assert card.ray is None
+    assert "RAY" not in text
+
+
+def test_weighted_ray_production_weights():
+    from solya.rules.ray import weighted_ray
+
+    assert weighted_ray([(None, 5.0), (80.0, 100.0)]) == 80.0
+    assert weighted_ray([(90.0, 0.0), (80.0, 0.0)]) is None
+    assert weighted_ray([(None, None)]) is None
+    assert weighted_ray([(90.0, 300.0), (60.0, 100.0)]) == 82.5
+
+
+class _RaisingRay:
+    def compute(self, site, local_date, session, actual_wh=None):
+        raise ZeroDivisionError("secret detail")
+
+
+async def test_ray_failure_never_breaks_evening_pull(h, load_fixture, caplog):
+    h.reporter._ray = _RaisingRay()
+    await pull_both(h, load_fixture)
+    with session_scope(h.db) as s:
+        for sid in (FARM, HOME):
+            row = s.get(DailyMetric, (sid, DAY))
+            assert row is not None and row.production_wh is not None and row.ray is None
+    await h.reporter.evening_report(1, DAY)
+    assert h.channel.sent[-1].text == REGRESSION
+    assert "ZeroDivisionError" in caplog.text
+    assert "secret detail" not in caplog.text
+
+
+class _DbErrorRay:
+    def compute(self, site, local_date, session, actual_wh=None):
+        from sqlalchemy.exc import OperationalError
+
+        raise OperationalError("UPDATE ray_daily", {}, Exception("database is locked"))
+
+
+async def test_ray_database_error_is_not_swallowed(h, load_fixture):
+    """A database error inside RAY leaves the session needing a rollback, so it must fail
+    the pull loudly rather than be logged as a RAY failure and lost at commit."""
+    h.reporter._ray = _DbErrorRay()
+    from sqlalchemy.exc import OperationalError
+
+    with pytest.raises(OperationalError):
+        await pull_both(h, load_fixture)

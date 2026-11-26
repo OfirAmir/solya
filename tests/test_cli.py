@@ -334,3 +334,162 @@ def test_pull_notify_rejected_token_not_printed(cfg, factory, monkeypatch, capsy
     out, err = capsys.readouterr()
     assert "SECRET" not in out and "SECRET" not in err
     assert "TELEGRAM_BOT_TOKEN" in err
+
+
+# ------------------------------------------------------------------- RAY tools
+
+RAY_COLUMNS = ["date", "actual_kwh", "ray", "perf", "perf_ratio", "hist_sub", "health", "env",
+               "expected_wh", "expected_source", "cv", "cloud_pct", "tmax_c", "pm10",
+               "confidence"]
+HIST_FC = "https://historical-forecast-api.open-meteo.com/v1/forecast"
+AQ_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
+
+
+def _ray_rows(factory):
+    from solya.models import RayDaily
+
+    with session_scope(factory) as s:
+        for i, d in enumerate([date(2026, 11, 23), date(2026, 11, 24)]):
+            s.add(RayDaily(
+                site_id=HOME, local_date=d, ray=70.0 + i, perf=0.81, perf_ratio=0.92,
+                hist_sub=0.88, health=0.77, env=0.66, expected_wh=33333.0,
+                expected_source="history", cv=0.123, cloud_pct=12.5, tmax_c=24.5, pm10=31.5,
+                confidence="normal" if i else "low", computed_at=FETCHED,
+            ))
+
+
+def test_ray_show_prints_every_column_newest_first(cfg, factory, capsys):
+    seed_sites(factory)
+    _ray_rows(factory)
+    with session_scope(factory) as s:
+        s.add(DailyMetric(site_id=HOME, local_date=DAY, production_wh=40050.0,
+                          comm_state="ok", as_of=FETCHED, computed_at=FETCHED))
+    assert run(cfg, "ray", "show", "--site", str(HOME), "--date", "2026-11-24") == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[0].split() == RAY_COLUMNS
+    assert out[2].split()[1] == "-"  # no production row for 23.11
+    assert out[1].split() == ["2026-11-24", "40.05", "71.0", "0.81", "0.92", "0.88", "0.77", "0.66",
+                              "33333.0", "history", "0.123", "12.5", "24.5", "31.5", "normal"]
+    assert out[2].startswith("2026-11-23") and out[2].split()[-1] == "low"
+
+
+def test_ray_show_default_window_and_unknown_site(cfg, factory, capsys):
+    seed_sites(factory)
+    _ray_rows(factory)
+    assert run(cfg, "ray", "show", "--site", str(HOME)) == 0
+    assert len(capsys.readouterr().out.splitlines()) == 3
+    assert run(cfg, "ray", "show", "--site", "1") == 1
+
+
+def _recompute_seed(factory, *, production=True, kwp=True):
+    seed_sites(factory)
+    with session_scope(factory) as s:
+        site = s.get(Site, HOME)
+        site.lat, site.lon = 32.0, 34.8
+        if not kwp:
+            site.peak_power_kwp_reported = None
+        if production:
+            s.add(DailyMetric(site_id=HOME, local_date=DAY, production_wh=40000.0,
+                              comm_state="ok", as_of=FETCHED, computed_at=FETCHED))
+
+
+def _mock_meteo():
+    hrs = [f"2026-11-24T{h:02d}:00" for h in range(24)]
+    respx.get(HIST_FC).mock(return_value=httpx.Response(200, json={
+        "hourly": {"time": hrs, "cloud_cover": [20.0] * 24},
+        "daily": {"time": ["2026-11-24"], "temperature_2m_max": [22.0]}}))
+    respx.get(AQ_URL).mock(return_value=httpx.Response(200, json={
+        "hourly": {"time": hrs, "pm10": [30.0] * 24}}))
+
+
+@respx.mock
+def test_ray_recompute_writes_row_and_never_calls_solaredge(cfg, factory, capsys):
+    from solya.models import RayDaily, WeatherDaily
+
+    _recompute_seed(factory)
+    _mock_meteo()
+    solaredge = respx.route(host="monitoringapi.solaredge.com").mock(
+        return_value=httpx.Response(500))
+    assert run(cfg, "ray", "recompute", "--site", str(HOME), "--date", "2026-11-24") == 0
+    assert not solaredge.called
+    with session_scope(factory) as s:
+        row = s.get(RayDaily, (HOME, DAY))
+        assert row is not None and row.ray is not None and row.expected_source == "table"
+        assert s.get(WeatherDaily, (HOME, DAY)).cloud_pct == 20.0
+    out = capsys.readouterr().out.splitlines()
+    assert out[0].split() == RAY_COLUMNS and out[1].startswith("2026-11-24")
+
+
+@respx.mock
+def test_ray_recompute_without_production_deletes_stale_row(cfg, factory, capsys):
+    from solya.models import RayDaily
+
+    _recompute_seed(factory, production=False)
+    _ray_rows(factory)
+    assert run(cfg, "ray", "recompute", "--site", str(HOME), "--date", "2026-11-24") == 0
+    assert "production" in capsys.readouterr().out
+    with session_scope(factory) as s:
+        assert s.get(RayDaily, (HOME, DAY)) is None
+        assert s.get(RayDaily, (HOME, date(2026, 11, 23))) is not None
+
+
+@respx.mock
+def test_ray_recompute_missing_weather_deletes_stale_row(cfg, factory, capsys):
+    from solya.models import RayDaily
+
+    _recompute_seed(factory)
+    _ray_rows(factory)
+    respx.get(HIST_FC).mock(return_value=httpx.Response(500))
+    respx.get(AQ_URL).mock(return_value=httpx.Response(500))
+    assert run(cfg, "ray", "recompute", "--site", str(HOME), "--date", "2026-11-24") == 0
+    assert "weather" in capsys.readouterr().out
+    with session_scope(factory) as s:
+        assert s.get(RayDaily, (HOME, DAY)) is None
+
+
+@respx.mock
+def test_ray_recompute_missing_kwp_says_so(cfg, factory, capsys):
+    from solya.models import RayDaily, WeatherDaily
+
+    _recompute_seed(factory, kwp=False)
+    with session_scope(factory) as s:
+        s.add(WeatherDaily(site_id=HOME, local_date=DAY, cloud_pct=20.0, tmax_c=22.0,
+                           pm10=30.0, source="open-meteo", fetched_at=FETCHED))
+    assert run(cfg, "ray", "recompute", "--site", str(HOME), "--date", "2026-11-24") == 0
+    assert "kWp" in capsys.readouterr().out
+    with session_scope(factory) as s:
+        assert s.get(RayDaily, (HOME, DAY)) is None
+
+
+@respx.mock
+def test_ray_recompute_refetches_incomplete_weather(cfg, factory, capsys):
+    from solya.models import RayDaily, WeatherDaily
+
+    _recompute_seed(factory)
+    with session_scope(factory) as s:
+        s.add(WeatherDaily(site_id=HOME, local_date=DAY, cloud_pct=20.0, tmax_c=22.0,
+                           pm10=None, source="open-meteo", fetched_at=FETCHED))
+    _mock_meteo()
+    assert run(cfg, "ray", "recompute", "--site", str(HOME), "--date", "2026-11-24") == 0
+    with session_scope(factory) as s:
+        assert s.get(WeatherDaily, (HOME, DAY)).pm10 == 30.0
+        assert s.get(RayDaily, (HOME, DAY)) is not None
+
+
+@respx.mock
+def test_ray_recompute_updates_daily_metrics_ray(cfg, factory, capsys):
+    from solya.models import RayDaily
+
+    _recompute_seed(factory)
+    with session_scope(factory) as s:
+        s.get(DailyMetric, (HOME, DAY)).ray = 12.0
+    _mock_meteo()
+    assert run(cfg, "ray", "recompute", "--site", str(HOME), "--date", "2026-11-24") == 0
+    with session_scope(factory) as s:
+        new = s.get(RayDaily, (HOME, DAY)).ray
+        assert s.get(DailyMetric, (HOME, DAY)).ray == new != 12.0
+        s.get(Site, HOME).peak_power_kwp_reported = None  # next recompute yields None
+    assert run(cfg, "ray", "recompute", "--site", str(HOME), "--date", "2026-11-24") == 0
+    with session_scope(factory) as s:
+        assert s.get(DailyMetric, (HOME, DAY)).ray is None
+        assert s.get(RayDaily, (HOME, DAY)) is None

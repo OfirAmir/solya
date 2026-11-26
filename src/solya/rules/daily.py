@@ -1,12 +1,14 @@
 """Daily per-site figures and state."""
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Literal
 from zoneinfo import ZoneInfo
 
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from solya.config import Settings
@@ -14,6 +16,8 @@ from solya.ingest import PullBundle
 from solya.models import DailyMetric, Site
 from solya.rules.comms import is_stale
 from solya.rules.ray import RayCalculator
+
+log = logging.getLogger(__name__)
 
 SiteState = Literal["ok", "comm_loss", "no_data", "reauth_needed"]
 
@@ -120,7 +124,20 @@ def compute_site_day(
     )
     if local_date is None:
         local_date = now.astimezone(ZoneInfo(site.tz)).date()
-    day.ray = ray.compute(site, local_date, session)
+    # Today's row is not persisted yet: RAY gets today's production directly.
+    # RAY is best-effort (spec interpretation 7): a failure never costs the day's figures.
+    # Flush earlier pending writes (faults) first, so their errors surface outside the
+    # guard. A database error inside RAY is not swallowed: it leaves the session needing
+    # a rollback, so the day's row could not be saved anyway; it fails loudly instead.
+    if session is not None:
+        session.flush()
+    try:
+        day.ray = ray.compute(site, local_date, session, actual_wh=overview.production_wh)
+    except SQLAlchemyError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.warning("RAY failed for site %s: %s", site.se_site_id, type(exc).__name__)
+        day.ray = None
     return day
 
 

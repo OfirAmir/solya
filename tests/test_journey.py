@@ -81,7 +81,7 @@ def _owners(container) -> list[Owner]:
 
 
 def test_landing_rtl_no_ray_when_disabled(tc, container):
-    assert container.settings.ray_implementation is None
+    assert container.settings.ray_visible is False
     r = tc.get("/")
     assert r.status_code == 200
     assert '<html dir="rtl" lang="he">' in r.text
@@ -97,9 +97,10 @@ def test_landing_rtl_no_ray_when_disabled(tc, container):
 def test_landing_mentions_ray_when_enabled(settings, clock, tmp_path):
     settings.database_url = f"sqlite:///{tmp_path}/solya.db"
     settings.ray_implementation = "solya.rules.ray:NullRay"
+    settings.ray_visible = True
     container = build_container(settings, clock=clock, channel=FakeChannel())
     with TestClient(create_app(container, start_background=False), base_url=HTTPS) as client:
-        assert "RAY FACTOR" in client.get("/").text
+        assert "מדד RAY" in client.get("/").text
 
 
 def test_signup_creates_web_owner_and_redirects(tc, container):
@@ -962,3 +963,11 @@ def test_connect_page_back_link_goes_to_sites_before_linking(tc, container):
     _add_site(container, owner_id, 111111)
     page = tc.get("/connect-site").text
     assert '<a href="/sites">חזרה לבחירת המערכות</a>' in page
+
+
+def test_landing_no_ray_when_implemented_but_hidden(settings, clock, tmp_path):
+    settings.database_url = f"sqlite:///{tmp_path}/solya.db"
+    settings.ray_implementation = "solya.rules.ray:NullRay"
+    container = build_container(settings, clock=clock, channel=FakeChannel())
+    with TestClient(create_app(container, start_background=False), base_url=HTTPS) as client:
+        assert "RAY" not in client.get("/").text

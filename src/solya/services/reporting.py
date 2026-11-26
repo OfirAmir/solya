@@ -13,9 +13,11 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
+import httpx
 from sqlalchemy import func, inspect, select
 from sqlalchemy.orm import Session
 
+from solya import weather
 from solya.clock import Clock
 from solya.config import Settings
 from solya.db import SessionFactory, session_scope
@@ -35,7 +37,7 @@ from solya.rules.faults import (
 )
 from solya.rules.ray import RayCalculator, weighted_ray
 from solya.scheduler import is_daylight
-from solya.services.backfill import backfill_month
+from solya.services.backfill import backfill_history, backfill_month
 from solya.services.onboarding import create_connect_request
 from solya.services.site_settings import display_name
 from solya.solaredge.client import SolarEdgeClient
@@ -152,7 +154,7 @@ def _card_row(d: SiteDay) -> CardRow:
     else:
         status = ("ok", "אין התראות פעילות")
     label = ("הכנסה מהזרמה" if d.income_basis == "export" else "הכנסה") if d.income_ils is not None else None
-    return CardRow(d.card_name, d.production_wh, d.income_ils, None, label, status)
+    return CardRow(d.card_name, d.production_wh, d.income_ils, None, label, status, d.ray)
 
 
 def build_owner_report(
@@ -174,6 +176,10 @@ def build_owner_report(
     if owner is None or not shown:
         return None
     days = [_stored_day(session, site, len(sites), local_date, now) for site in shown]
+    if not settings.ray_visible:  # stored values stay; nothing owner-facing carries RAY
+        for d in days:
+            d.ray = None
+    overall_ray = weighted_ray([(d.ray, d.production_wh) for d in days])
     local_dt = now.astimezone(ZoneInfo(shown[0].tz))
     # Spec section 1: a total for several sites with production; its ₪ only when every
     # site has income (a partial ₪ sum next to the full kWh sum looks wrong)
@@ -193,14 +199,14 @@ def build_owner_report(
         as_of = min(updates).astimezone(ZoneInfo(shown[0].tz))
         header += f" · נכון ל־{as_of:%H:%M}"
     card = CardData(
-        ray=weighted_ray([(d.ray, d.kwp) for d in days]),
+        ray=overall_ray,
         rows=[_card_row(d) for d in days],
         total=total,
         header=header,
         site_count=len(days),
         footnote="הכנסה משוערת לפני מע״מ" if any(d.income_ils is not None for d in days) else None,
     )
-    return card, he.daily_report(owner.display_name, days, local_dt, show_total)
+    return card, he.daily_report(owner.display_name, days, local_dt, show_total, overall_ray)
 
 
 class Reporter:
@@ -217,7 +223,9 @@ class Reporter:
         schedule_retry: ScheduleRetry,
         delay_send: DelaySend | None = None,
         replan_owner: Callable[[int], None] | None = None,
+        http: httpx.AsyncClient | None = None,
     ) -> None:
+        self._http = http
         self._sf = session_factory
         self._client = client
         self._tokens = tokens
@@ -232,6 +240,7 @@ class Reporter:
         self._delay_send = delay_send or self._default_delay_send
         self._retry_requested: set[tuple[int, date]] = set()
         self._background: set[asyncio.Task] = set()
+        self._backfilling: dict[int, asyncio.Task] = {}  # site_id -> running backfill
 
     # ------------------------------------------------------------------ pulls
 
@@ -266,6 +275,16 @@ class Reporter:
         Returns None when the pull was skipped (unknown or inactive site, auth, budget)."""
         return await self._pull_and_process(site_id, kind, None, notify=notify)
 
+    async def _store_weather(
+        self, site_id: int, lat: float, lon: float, tz: str, local_date: date
+    ) -> None:
+        try:
+            day = await weather.fetch_day(self._http, lat, lon, tz, local_date)
+            with session_scope(self._sf) as s:
+                weather.store_day(s, site_id, local_date, day, self._clock.now())
+        except Exception as exc:  # noqa: BLE001 - weather must never block the report
+            log.warning("site %s weather not stored: %s", site_id, type(exc).__name__)
+
     async def _pull_and_process(
         self, site_id: int, kind: str, local_date: date | None, notify: bool = True
     ) -> PullBundle | None:
@@ -280,6 +299,7 @@ class Reporter:
                 return None
             tz = site.tz
             call_plan = site.call_plan
+            lat, lon = site.lat, site.lon
             # R1: the evening status window covers the whole daylight period.
             daylight = True if kind == "evening" else is_daylight(site, now)
         if local_date is None:
@@ -300,6 +320,15 @@ class Reporter:
         if kind == "midday" and _budget_refused(bundle):
             log.warning("site %s: credit budget exceeded; midday check skipped", site_id)
             return None
+
+        if (
+            kind == "evening"
+            and self._settings.ray_implementation
+            and self._http is not None
+            and lat is not None
+            and lon is not None
+        ):
+            await self._store_weather(site_id, lat, lon, tz, local_date)
 
         outgoing, no_data = self._process(site_id, kind, local_date, bundle, daylight, notify)
         if not notify:
@@ -677,13 +706,27 @@ class Reporter:
     # -------------------------------------------------------------- backfill
 
     def backfill_soon(self, site_id: int) -> None:
-        """Run the month-to-date backfill for ``site_id`` in the background. Never raises
-        into the caller; failures are logged by exception type only."""
+        """Run the month-to-date backfill for ``site_id`` in the background, then (RAY
+        enabled) the history backfill. Never raises into the caller; failures are logged
+        by exception type only. A backfill already running for the site is not doubled."""
+        running = self._backfilling.get(site_id)
+        if running is not None and not running.done():
+            log.info("backfill for site %s already running; skipped", site_id)
+            return
+
         async def run() -> None:
             try:
                 await backfill_month(self._client, self._sf, site_id, self._clock.now())
             except Exception as e:
                 log.warning("backfill for site %s failed: %s", site_id, type(e).__name__)
+            if not self._settings.ray_implementation:
+                return
+            try:
+                await backfill_history(self._client, self._sf, site_id, self._clock.now())
+            except Exception as e:
+                log.warning(
+                    "history backfill for site %s failed: %s", site_id, type(e).__name__
+                )
 
         try:
             task = asyncio.get_running_loop().create_task(run())
@@ -692,6 +735,13 @@ class Reporter:
             return
         self._background.add(task)
         task.add_done_callback(self._background.discard)
+        self._backfilling[site_id] = task
+
+        def forget(t: asyncio.Task) -> None:
+            if self._backfilling.get(site_id) is t:
+                del self._backfilling[site_id]
+
+        task.add_done_callback(forget)
 
     # -------------------------------------------------------------- delivery
 

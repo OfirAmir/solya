@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 from datetime import date
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Literal, Protocol
 
 from sqlalchemy.orm import Session
@@ -13,26 +15,63 @@ RayBand = Literal["green", "orange", "yellow", "red"]
 
 
 class RayCalculator(Protocol):
-    def compute(self, site: Site, local_date: date, session: Session | None) -> float | None: ...
+    def compute(
+        self, site: Site, local_date: date, session: Session | None, actual_wh: float | None = None
+    ) -> float | None: ...
 
 
 class NullRay:
-    def compute(self, site: Site, local_date: date, session: Session | None) -> float | None:
+    def compute(
+        self, site: Site, local_date: date, session: Session | None, actual_wh: float | None = None
+    ) -> float | None:
         return None
 
 
-def load_ray(path: str | None) -> RayCalculator:
-    """Load a calculator from ``module:Class``; ``None`` or empty disables RAY."""
+def _takes_one_argument(cls: type) -> bool:
+    try:
+        params = list(inspect.signature(cls).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    positional = [
+        p for p in params if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.VAR_POSITIONAL)
+    ]
+    return len(positional) >= 1
+
+
+def _takes_clock(cls: type) -> bool:
+    try:
+        return "clock" in inspect.signature(cls).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def load_ray(
+    path: str | None, settings: object | None = None, clock: object | None = None
+) -> RayCalculator:
+    """Load a calculator from ``module:Class``; ``None`` or empty disables RAY.
+
+    A class whose constructor takes one argument gets ``settings``; others get none.
+    A constructor with a ``clock`` parameter also gets ``clock`` when one is given.
+    """
     if not path:
         return NullRay()
     module_name, _, class_name = path.partition(":")
     if not module_name or not class_name:
         raise ValueError(f"RAY implementation must look like 'module:Class', got {path!r}")
     cls = getattr(importlib.import_module(module_name), class_name)
-    return cls()
+    kwargs = {"clock": clock} if clock is not None and _takes_clock(cls) else {}
+    if _takes_one_argument(cls):
+        return cls(settings, **kwargs)
+    return cls(**kwargs)
+
+
+def display_ray(score: float) -> int:
+    """RAY as shown to owners: rounded half-up to an integer (spec interpretation 6)."""
+    return int(Decimal(str(score)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
 def ray_band(score: float) -> RayBand:
+    """Band colour; callers pass the displayed integer (``display_ray``)."""
     if score >= 90:
         return "green"
     if score >= 80:
@@ -43,16 +82,18 @@ def ray_band(score: float) -> RayBand:
 
 
 def weighted_ray(items: list[tuple[float | None, float | None]]) -> float | None:
-    """kWp-weighted mean of (score, kwp) pairs; None if any score is None or no kWp."""
-    if not items:
-        return None
-    total_kwp = 0.0
+    """Mean of (score, weight) pairs weighted by the day's production Wh.
+
+    Items with a None score (or None weight) are skipped; None if nothing remains or the
+    total weight is not positive.
+    """
     acc = 0.0
-    for score, kwp in items:
-        if score is None or kwp is None:
-            return None
-        acc += score * kwp
-        total_kwp += kwp
-    if total_kwp <= 0:
+    total = 0.0
+    for score, weight in items:
+        if score is None or weight is None:
+            continue
+        acc += score * weight
+        total += weight
+    if total <= 0:
         return None
-    return acc / total_kwp
+    return acc / total

@@ -249,3 +249,21 @@ def test_admin_ai_tokens_use_the_budget_month(tc, container):
     assert _login(tc).status_code == 303
     body = tc.get("/admin").text
     assert re.search(r"<td>\d+</td>\s*<td>42</td>", body)
+
+
+def test_admin_shows_yesterdays_ray_and_confidence(tc, container):
+    from datetime import date
+    from solya.models import RayDaily
+
+    _seed(container)
+    yesterday = date(2026, 11, 23)  # the fixed clock is 2026-11-24 17:00 Israel
+    with session_scope(container.session_factory) as s:
+        s.add(RayDaily(site_id=3033498, local_date=yesterday, ray=73.4, confidence="low",
+                       computed_at=container.clock.now()))
+        s.add(RayDaily(site_id=4044, local_date=date(2026, 11, 20), ray=99.0,
+                       confidence="normal", computed_at=container.clock.now()))
+    _login(tc)
+    body = tc.get("/admin").text
+    assert "RAY" in body
+    assert "73.4" in body and "נמוכה" in body
+    assert "99.0" not in body  # only yesterday's row

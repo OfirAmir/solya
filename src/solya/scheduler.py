@@ -32,6 +32,9 @@ REMINDER_INTERVAL_MINUTES = 15
 LATE_REPORT_DELAY = timedelta(minutes=5)
 # Name defaults and the month-to-date backfill run once, this long after start.
 STARTUP_JOB_DELAY = timedelta(minutes=1)
+# The backfill (with RAY, the history months too) also runs on the 1st of every month.
+MONTHLY_BACKFILL_DAY = 1
+MONTHLY_BACKFILL_HOUR = 1
 
 JobKind = Literal["evening_pull", "evening_report", "midday_check"]
 
@@ -121,6 +124,13 @@ class SchedulerService:
             DateTrigger(run_date=self._clock.now() + STARTUP_JOB_DELAY),
             "startup_backfill",
         )
+        self._add(
+            "monthly_backfill",
+            CronTrigger(
+                day=MONTHLY_BACKFILL_DAY, hour=MONTHLY_BACKFILL_HOUR, minute=0, timezone=self._tz
+            ),
+            "monthly_backfill",
+        )
         self.scheduler.start()
         self.plan_today()
 
@@ -184,6 +194,18 @@ class SchedulerService:
         for site_id in site_ids:
             self._reporter.backfill_soon(site_id)
 
+    def monthly_backfill(self) -> None:
+        """On the 1st at 01:00 local: the backfill for every active, monitored site (with
+        RAY, the previous month and the history months as well)."""
+        with session_scope(self._factory) as s:
+            site_ids = list(s.scalars(
+                select(Site.se_site_id)
+                .where(Site.status == "active", Site.monitored.is_(True))
+                .order_by(Site.se_site_id)
+            ))
+        for site_id in site_ids:
+            self._reporter.backfill_soon(site_id)
+
     def plan_owner(self, owner_id: int) -> None:
         """R26: re-plan today's jobs for one owner, e.g. right after a site connects."""
         self.plan_today(owner_id)
@@ -221,6 +243,8 @@ class SchedulerService:
                 self.plan_today()
             elif method == "startup_backfill":
                 self.startup_backfill()
+            elif method == "monthly_backfill":
+                self.monthly_backfill()
             else:
                 await getattr(self._reporter, method)(*args)
         except Exception:

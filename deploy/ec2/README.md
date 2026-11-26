@@ -212,6 +212,15 @@ These names come from the main README's `.env` table. Set them in `/opt/solya/.e
 | `SESSION_SECRET` | Optional. Signs the web session cookies. When unset it is derived from `TOKEN_ENCRYPTION_KEY`. To set one, use the output of `openssl rand -hex 32`. |
 | `LLM_ENABLED`, `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, `LLM_MONTHLY_TOKENS_PER_OWNER` | Optional AI answers, off by default. Read "Optional AI answers" in the main README before you turn them on, because owners' questions then leave the server. |
 
+### RAY rollout (optional)
+
+RAY is off until you set it. Open-Meteo's free tier is non-commercial, and the built-in national yield table is approximate (PVGIS was unreachable at build time), so Oren should confirm it before RAY is shown to customers.
+
+1. In `/opt/solya/.env` set `RAY_IMPLEMENTATION=solya.rules.ray_v1:RayV1` and leave `RAY_VISIBLE` unset (false). Restart (`docker compose up -d`).
+2. After the next evening pull, check `docker compose exec solya solya ray show --site ID` and the yesterday's RAY column on `/admin`. History backfill uses at most 6 SolarEdge credits per site per month, including the existing 2.
+3. Fix a day after correcting data with `docker compose exec solya solya ray recompute --site ID --date YYYY-MM-DD` (no SolarEdge calls).
+4. When Oren approves the numbers, set `RAY_VISIBLE=true` and restart.
+
 Do **not** set `TRUSTED_PROXIES` in `.env`. `docker-compose.caddy.yml` sets it to Caddy's fixed address (`SOLYA_CADDY_IP`, `192.168.250.10` by default), so the real visitor IP reaches the rate limits and the admin login lockout. A value in `.env` is ignored.
 
 Leave `PUBLIC_BASE_URL`, `TOKEN_ENCRYPTION_KEY`, `COMPOSE_FILE`, `COMPOSE_PROJECT_NAME`, `SOLYA_SUBNET`, `SOLYA_IP_RANGE` and `SOLYA_CADDY_IP` as `setup.sh` wrote them.
