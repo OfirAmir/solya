@@ -529,7 +529,7 @@ async def test_on_site_connected_welcomes(h):
     await h.reporter.on_site_connected(site, is_first=True)
 
     texts = [m.text for m in h.channel.sent]
-    connected = rtl_text("המערכת משק חוברה בהצלחה. יש לך עוד מערכת? שלחו /connect.")
+    connected = rtl_text("המערכת משק חוברה בהצלחה. יש לך עוד מערכת? שלח /connect.")
     assert texts == [connected, rtl_text(WELCOME_1)]
     assert f"{RLM}24/7" in texts[1]
     assert [seconds for seconds, _ in h.delayed] == [60]
@@ -545,7 +545,7 @@ async def test_on_site_connected_welcomes(h):
 async def test_on_site_connected_already_message(h):
     await h.reporter.on_site_connected(HOME, is_first=False, already=True)
     (msg,) = h.channel.sent
-    assert msg.text == rtl_text("המערכת בית כבר מחוברת. בחלון של SolarEdge בחרו מערכת אחרת.")
+    assert msg.text == rtl_text("המערכת בית כבר מחוברת. בחלון של SolarEdge בחר מערכת אחרת.")
     assert "\u200e" not in msg.text
     assert not h.delayed
 
@@ -553,7 +553,7 @@ async def test_on_site_connected_already_message(h):
 async def test_on_site_connected_command_has_no_direction_marks(h):
     await h.reporter.on_site_connected(HOME, is_first=False)
     (msg,) = h.channel.sent
-    assert msg.text.endswith("שלחו /connect.")
+    assert msg.text.endswith("שלח /connect.")
     assert "\u200f/connect" not in msg.text and "\u200e" not in msg.text
 
 
@@ -973,3 +973,20 @@ async def test_ray_failure_never_breaks_evening_pull(h, load_fixture, caplog):
     assert h.channel.sent[-1].text == REGRESSION
     assert "ZeroDivisionError" in caplog.text
     assert "secret detail" not in caplog.text
+
+
+class _DbErrorRay:
+    def compute(self, site, local_date, session, actual_wh=None):
+        from sqlalchemy.exc import OperationalError
+
+        raise OperationalError("UPDATE ray_daily", {}, Exception("database is locked"))
+
+
+async def test_ray_database_error_is_not_swallowed(h, load_fixture):
+    """A database error inside RAY leaves the session needing a rollback, so it must fail
+    the pull loudly rather than be logged as a RAY failure and lost at commit."""
+    h.reporter._ray = _DbErrorRay()
+    from sqlalchemy.exc import OperationalError
+
+    with pytest.raises(OperationalError):
+        await pull_both(h, load_fixture)
