@@ -3,6 +3,7 @@ import hmac
 from functools import lru_cache
 
 import json
+import math
 from typing import Annotated
 
 from pydantic import AnyHttpUrl, SecretStr, field_validator
@@ -59,8 +60,8 @@ class Settings(BaseSettings):
     @field_validator("ray_national_kwh_per_kwp_day")
     @classmethod
     def _check_national_table(cls, v):
-        if len(v) != 12 or any(x <= 0 for x in v):
-            raise ValueError("ray_national_kwh_per_kwp_day needs exactly 12 positive values")
+        if len(v) != 12 or any(not math.isfinite(x) or x <= 0 for x in v):
+            raise ValueError("ray_national_kwh_per_kwp_day needs exactly 12 finite positive values")
         return v
 
     @field_validator("trusted_proxies", mode="before")

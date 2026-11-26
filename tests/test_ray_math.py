@@ -53,9 +53,31 @@ def test_national_table_default_valid(settings):
     assert settings.ray_visible is False
 
 
-@pytest.mark.parametrize("bad", [[1.0] * 11, [1.0] * 13, [1.0] * 11 + [0.0]])
+@pytest.mark.parametrize("bad", [[1.0] * 11, [1.0] * 13, [1.0] * 11 + [0.0],
+                                 [1.0] * 11 + [float("inf")], [1.0] * 11 + [float("nan")]])
 def test_settings_rejects_bad_table(settings, bad):
     data = settings.model_dump()
     data["ray_national_kwh_per_kwp_day"] = bad
     with pytest.raises(ValidationError):
         Settings.model_validate(data)
+
+
+def _env_settings(monkeypatch, table: str) -> Settings:
+    monkeypatch.setenv("RAY_NATIONAL_KWH_PER_KWP_DAY", table)
+    return Settings(
+        _env_file=None, solaredge_client_id="i", solaredge_client_secret="s",
+        telegram_bot_token="1:t", telegram_bot_username="b",
+        public_base_url="https://solya.example", token_encryption_key="k" * 44,
+    )
+
+
+def test_national_table_from_env_json(monkeypatch):
+    s = _env_settings(monkeypatch, "[1,2,3,4,5,6,7,8,9,10,11,12.5]")
+    assert s.ray_national_kwh_per_kwp_day == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12.5]
+
+
+@pytest.mark.parametrize("bad", ["[1,2,3]", "[1,1,1,1,1,1,1,1,1,1,1,Infinity]",
+                                 "[1,1,1,1,1,1,1,1,1,1,1,NaN]"])
+def test_national_table_env_rejects_bad(monkeypatch, bad):
+    with pytest.raises(ValidationError):
+        _env_settings(monkeypatch, bad)

@@ -2,6 +2,7 @@ import logging
 from datetime import date, datetime, timezone
 
 import httpx
+import pytest
 import respx
 from sqlalchemy import select
 
@@ -160,3 +161,28 @@ async def test_no_url_in_info_logs(h, load_fixture, db, caplog):
     text = "\n".join(r.getMessage() for r in caplog.records if r.name.startswith("solya"))
     assert "weather fetch failed: ConnectTimeout" in text
     assert "open-meteo" not in text and "31.77" not in text
+
+
+def _raw(body):
+    import json
+
+    return httpx.Response(200, text=json.dumps(body), headers={"content-type": "application/json"})
+
+
+@respx.mock
+async def test_non_finite_clamped_and_negative_values():
+    nan, inf = float("nan"), float("inf")
+    cloud = [0.0] * 7 + [150.0, -10.0, nan, inf, 50.0, 50.0, 50.0, 50.0, 50.0, 50.0] + [0.0] * 7
+    pm = [0.0] * 7 + [-5.0, nan, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0] + [0.0] * 7
+    respx.get(FC).mock(return_value=_raw(forecast_body(cloud, tmax=inf)))
+    respx.get(AQ).mock(return_value=_raw(aq_body(pm)))
+    day = await fetch()
+    # cloud: 100 (clamped), 0 (clamped), NaN/inf skipped, six 50s -> 400/8
+    assert day.cloud_pct == 50.0
+    assert day.tmax_c is None
+    assert day.pm10 == 10.0  # negative and NaN hours skipped
+
+
+@pytest.mark.parametrize("v", [float("nan"), float("inf"), float("-inf"), True, "3", None])
+def test_num_rejects_non_finite_and_non_numbers(v):
+    assert weather._num(v) is None

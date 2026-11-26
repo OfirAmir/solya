@@ -5,6 +5,7 @@ logged, since request URLs carry the site's coordinates."""
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from datetime import date, datetime
 
@@ -33,7 +34,21 @@ class WeatherDay:
 def _num(v: object) -> float | None:
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         return None
-    return float(v)
+    f = float(v)
+    return f if math.isfinite(f) else None
+
+
+def _cloud(v: object) -> float | None:
+    f = _num(v)
+    return None if f is None else min(100.0, max(0.0, f))
+
+
+def _pm10(v: object) -> float | None:
+    f = _num(v)
+    return f if f is not None and f >= 0 else None
+
+
+_CLEAN = {"cloud_cover": _cloud, "pm10": _pm10}
 
 
 def _window_mean(hourly: dict, key: str, local_date: date) -> float | None:
@@ -45,7 +60,7 @@ def _window_mean(hourly: dict, key: str, local_date: date) -> float | None:
             stamp = datetime.fromisoformat(t)
         except (TypeError, ValueError):
             continue
-        value = _num(v)
+        value = _CLEAN.get(key, _num)(v)
         if value is not None and stamp.date() == local_date and stamp.hour in WINDOW_HOURS:
             valid.append(value)
     return sum(valid) / len(valid) if len(valid) >= MIN_VALID_HOURS else None
