@@ -17,6 +17,7 @@ from solya.db import session_scope
 from solya.models import ApiLedger, ConnectRequest, DailyMetric, FaultRecord, Owner, Site, SiteToken
 from solya.render import card as card_mod
 from solya.render.card import TOTAL_LABEL, assert_raqm
+from solya.rules.ray import NullRay
 from solya.scheduler import plan_day_jobs
 from solya.services import answers, reporting
 from solya.solaredge.oauth import TokenPair
@@ -804,3 +805,27 @@ async def test_a11_web_journey_end_to_end(settings, load_fixture, cards, tmp_pat
                 assert "ממתין לתשלום" in row and "<td>כן</td>" in row
     finally:
         await close(c)
+
+
+# ------------------------------------------------------------------ a12: Instinct parity
+
+
+async def test_a12_instinct_parity_25_nov(c, settings):
+    day = date(2026, 11, 25)
+    now = datetime(2026, 11, 25, 15, 5, tzinfo=timezone.utc)  # 17:05 local
+    with session_scope(c.session_factory) as s:
+        # Income from unrounded Wh: 305.87 x 0.45 = 137.64 and 74.96 x 0.48 = 35.98.
+        s.add(DailyMetric(site_id=FARM, local_date=day, production_wh=305870,
+                          income_ils=Decimal("137.64"), comm_state="ok", as_of=now, computed_at=now))
+        s.add(DailyMetric(site_id=HOME, local_date=day, production_wh=82600, export_wh=74960,
+                          income_ils=Decimal("35.98"), comm_state="ok", as_of=now, computed_at=now))
+        card, body = reporting.build_owner_report(s, 1, day, now, settings, NullRay())
+
+    body = body.replace(RLM, "")
+    assert "305.9 קוט״ש, הכנסה 137.64 ₪" in body
+    assert "82.6 קוט״ש, הכנסה מהזרמה 35.98 ₪" in body
+    assert "סה״כ: 388.5 קוט״ש, 173.62 ₪ לפני מע״מ" in body
+    assert len(card.rows) == 2
+    assert [r.status for r in card.rows] == [("ok", "אין התראות פעילות")] * 2
+    assert card.site_count == 2
+    assert card.footnote

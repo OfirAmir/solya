@@ -89,7 +89,7 @@ Tell Ofir to open the file on the server with `nano /opt/solya/.env`. **Prompt h
 | `SOLAREDGE_CLIENT_ID` | From Oren. This is the Solya developer app (route B in the guide, step 4). |
 | `SOLAREDGE_CLIENT_SECRET` | From Oren, sent privately. He must **copy** the existing secret, **not regenerate** it, or the vendor's running system stops. |
 
-Oren must also set that app's **redirect URI** to exactly `https://<host>/oauth/callback`.
+Oren must also set that app's **redirect URI** to exactly `https://<host>/oauth/callback` and make it the app's **default** redirect URI. SolarEdge ignores the other entries and sends the owner to the default one (observed live on 26 Nov: owners landed on an old URL).
 
 **Strongly recommended:**
 

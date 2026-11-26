@@ -155,6 +155,8 @@ The app's redirect URI must be exactly this (it is the path in `src/solya/web/oa
 https://<host>/oauth/callback
 ```
 
+Make it the app's **default** redirect URI: SolarEdge ignores the other entries and sends the owner to the default one (observed live on 26 Nov: owners landed on an old URL). Do not rely on a list of several redirect URIs.
+
 Which app to use is Oren's decision. There are two routes.
 
 > [!WARNING]
@@ -168,7 +170,7 @@ Oren signs up for a **new free developer account** at developer.solaredge.com, u
 
 - type **"Site Access (OAuth)"**
 - scopes **`SITE_DATA`** and **`DEVICE_DATA`**
-- redirect URI **`https://<host>/oauth/callback`**
+- redirect URI **`https://<host>/oauth/callback`**, set as the **default** redirect URI
 
 The account comes with its own 2,000 credits a month. Oren's two sites use about 520 of them.
 
@@ -176,7 +178,7 @@ The account comes with its own 2,000 credits a month. Oren's two sites use about
 
 This route reuses the app in the Solya developer account, which the software house connected. It is on the Business Starter plan until 17 Dec 2026. Oren chose this route because he is leaving the vendor. Before switching, know what it does:
 
-1. **The vendor's new connections stop working.** The app has one registered redirect URI, and pointing it at this server breaks the vendor's connect flow for anyone new. Connections that already exist should keep running, because grants already given do not depend on the redirect URI. If other customers are still onboarding through the vendor, tell Oren first.
+1. **The vendor's new connections stop working.** The app's default redirect URI is the only one SolarEdge uses, and pointing it at this server breaks the vendor's connect flow for anyone new. Connections that already exist should keep running, because grants already given do not depend on the redirect URI. If other customers are still onboarding through the vendor, tell Oren first.
 2. **Copy the client secret. Do not regenerate it.** The vendor's running system uses the same secret to refresh its tokens. If the portal only lets Oren *regenerate* the secret, the vendor's service stops that same day. Do that only if Oren means to cut the vendor off.
 3. **Credits and the rate limit are shared with the vendor.** The plan's 20,000 credits a month and 25 calls a minute cover everything the vendor still runs, plus this server. Solya's budget guard counts only its own calls. If the vendor uses up the month, SolarEdge refuses this server's pulls as well. The evening report then says the data has not arrived; it never shows zero. Ask the vendor to stop polling, or switch the app off on their side, as soon as Oren is ready.
 4. **The plan reverts on 17 Dec.** After that the account is on the free tier: 2,000 credits a month and one app. That is still enough for Oren's two sites, as long as the vendor's system has stopped by then.
@@ -427,7 +429,7 @@ Look at Caddy's log:
 
 ### "redirect_uri mismatch", or SolarEdge shows an error after approval
 
-The redirect URI registered in the SolarEdge app must be exactly `https://<host>/oauth/callback`. That means `https`, the same `<host>` as `PUBLIC_BASE_URL`, the path `/oauth/callback`, and no trailing slash. Compare it with what `setup.sh` printed, or with:
+The redirect URI registered in the SolarEdge app must be exactly `https://<host>/oauth/callback`. That means `https`, the same `<host>` as `PUBLIC_BASE_URL`, the path `/oauth/callback`, and no trailing slash. It must also be the app's **default** redirect URI, because SolarEdge ignores the other entries. Compare it with what `setup.sh` printed, or with:
 
 ```bash
 grep '^PUBLIC_BASE_URL=' /opt/solya/.env
@@ -463,7 +465,7 @@ The server's clock may be in UTC. That is fine, and you do not need to change th
 
 1. Attach an Elastic IP so it does not happen again.
 2. Edit `PUBLIC_BASE_URL` in `/opt/solya/.env` to `https://<new-host>`.
-3. Change the SolarEdge app's redirect URI to `https://<new-host>/oauth/callback`.
+3. Change the SolarEdge app's default redirect URI to `https://<new-host>/oauth/callback`.
 4. Re-run `/opt/solya/deploy/ec2/setup.sh`.
 5. Create new invites. Old links point at the old name.
 

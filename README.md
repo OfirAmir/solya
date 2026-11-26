@@ -18,7 +18,7 @@ Do these steps in order.
 
 1. **Create a new developer account** at developer.solaredge.com. Do not reuse Oren's personal "Oren Home Monitor" app: its daily job rotates the same sites' refresh tokens, and the two would race. Do not use the software house's Solya account either.
 2. **Register an app of type "Site Access (OAuth)"** with the scopes `SITE_DATA` and `DEVICE_DATA`.
-3. **Set the redirect URI** to `https://<your-host>/oauth/callback`. `<your-host>` is the public HTTPS host from step 8. Note the client id and client secret.
+3. **Set the redirect URI** to `https://<your-host>/oauth/callback`, and make it the app's **default** redirect URI. SolarEdge ignores the other entries and sends the owner to the default one (observed live on 26 Nov: owners landed on an old URL). `<your-host>` is the public HTTPS host from step 8. Note the client id and client secret.
 4. **Create a Telegram bot with BotFather** (`/newbot`). Note the bot token and the bot username (without the `@`).
 5. **Fill in `.env`.** Copy the template and edit it:
 
@@ -112,7 +112,7 @@ Do these steps in order.
 
    Send the one that suits the person. The Telegram link registers them in the bot directly. The web link opens the sign-up form with the code filled in. The token works once, whichever link is used.
 10. **Oren connects his sites, one approval per site**, so he does this twice. Through Telegram he sends `/connect` to the bot once per site and approves each one at SolarEdge; after each approval the bot confirms in Telegram. An owner who signed up on the web connects through the web journey below instead, and the same approval applies.
-11. **Set labels, tariffs and the rest.** Check the site ids first with `docker compose exec solya solya sites list`, then run the commands below (the ids are Oren's two sites):
+11. **Optional: override labels, tariffs and the rest.** Owners set their own system name, tariff and income basis on `/sites` and `/settings` (see Owner settings below), so this step is an override only. Check the site ids first with `docker compose exec solya solya sites list`, then run the commands below (the ids are Oren's two sites):
 
     ```bash
     solya sites set --site 3033498 --label משק --tariff 0.45 --income-basis production --kwp 90.72 --commercial
@@ -120,6 +120,19 @@ Do these steps in order.
     ```
 
     Run them as `docker compose exec solya solya sites set ...`. Quote any value with spaces.
+
+## Owner settings
+
+Owners manage their own systems; the admin does not have to run `sites set`.
+
+- **`/sites`** lists the connected systems. For each one the owner picks whether to monitor it, and sets the name, the tariff (0.05 to 3.00 ₪/kWh, up to 4 decimals; "0,48", "₪0.48" and "0.48 ₪" are accepted) and the income basis (production or export). Name is 1 to 30 characters.
+- **`/settings`**: the owner sends `/settings` to the bot. The bot replies with a single-use link that is valid for 15 minutes. The link opens a confirm page (nothing happens on the GET); after the owner presses the button, a web session starts and lasts 24 hours. The link is stored hashed. A second use or an old link shows the "expired" page. The same links are sent for the free text "תחבר לי עוד מערכת" and "תעריף".
+- When monitoring changes the price, the admin gets a notice.
+- **Commands menu.** At startup the bot registers its commands with Telegram (`set_my_commands`), so they show in the menu next to the message box. Invisible direction marks that Telegram adds to copied commands are stripped before the command is read.
+
+### Backfill
+
+When an owner connects a system, and once at startup, Solya fills the month so far from SolarEdge, so the month figures are not empty. It uses at most 2 API credits per site per calendar month (energy and meter telemetry), at the lowest ("optional") priority. It writes only days before today (site-local) that have no row yet. Today's row belongs to the evening pull and existing rows are never changed.
 
 ## Web journey
 
@@ -135,7 +148,7 @@ The link token is single use and cleared once the chat is linked. An owner with 
 
 ### Price
 
-The price is 49.97 ₪ per site up to 50 kW plus 1.00 ₪ per kW above 50, rounded half-up to the agora. The power used is `--kwp` (the installed kW kept on the site, `billing_kwp_override`) when set. Otherwise the portal's reported peak power is used and the price is shown as an **estimate** ("הערכה לפי נתוני הפורטל, המחיר הסופי ייקבע לפי ההספק המותקן"), because the portal figure is not used for billing. With neither, the price is shown as unknown. Run `sites set --site ID --kwp N` for each site to make its price final.
+The price is 49.97 ₪ per site up to 50 kW plus 1.00 ₪ per kW above 50, rounded half-up to the agora. The power used is `--kwp` (the installed kW kept on the site, `billing_kwp_override`) when set. Otherwise the portal's reported peak power is used and the price is shown as an **estimate** ("הערכה לפי נתוני הפורטל, המחיר הסופי ייקבע לפי ההספק המותקן"), because the portal figure is not used for billing. With neither, the price is shown as unknown. Run `sites set --site ID --kwp N` for each site to make its price final (an admin override).
 
 ## Admin commands
 
