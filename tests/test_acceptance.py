@@ -731,6 +731,7 @@ async def test_a11_web_journey_end_to_end(settings, load_fixture, cards, tmp_pat
     settings.admin_password = SecretStr("correct horse battery")
     clock = FixedClock(NOW)
     c = make_container(settings, clock, url=f"sqlite:///{tmp_path}/solya.db")
+    c.reporter.backfill_soon = lambda site_id: None  # the callback must not start a real backfill
     with session_scope(c.session_factory) as s:
         code = onboarding.create_invite(s, "admin", clock.now())
     csrf_re = re.compile(r'name="csrf" value="([^"]+)"')

@@ -32,6 +32,7 @@ def env(settings, clock, tmp_path):
         clock.advance(timedelta(seconds=seconds))
 
     container = build_container(settings, clock=clock, channel=channel, budget_sleep=sleep)
+    container.reporter.backfill_soon = lambda site_id: None  # no real backfill from callbacks
     with session_scope(container.session_factory) as s:
         owner = Owner(display_name="Dana", telegram_chat_id=555, active=True,
                       last_inbound_at=clock.now(), created_at=clock.now())

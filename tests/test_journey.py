@@ -34,7 +34,10 @@ def container(settings, clock, tmp_path):
     async def sleep(seconds):  # SolarEdge request spacing advances the fixed clock
         clock.advance(timedelta(seconds=seconds))
 
-    return build_container(settings, clock=clock, channel=FakeChannel(), budget_sleep=sleep)
+    container = build_container(settings, clock=clock, channel=FakeChannel(), budget_sleep=sleep)
+    # callbacks must not start real month backfill tasks (tests that care patch it again)
+    container.reporter.backfill_soon = lambda site_id: None
+    return container
 
 
 @pytest.fixture
