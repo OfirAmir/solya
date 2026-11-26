@@ -154,7 +154,7 @@ def _card_row(d: SiteDay) -> CardRow:
     else:
         status = ("ok", "אין התראות פעילות")
     label = ("הכנסה מהזרמה" if d.income_basis == "export" else "הכנסה") if d.income_ils is not None else None
-    return CardRow(d.card_name, d.production_wh, d.income_ils, None, label, status)
+    return CardRow(d.card_name, d.production_wh, d.income_ils, None, label, status, d.ray)
 
 
 def build_owner_report(
@@ -176,6 +176,10 @@ def build_owner_report(
     if owner is None or not shown:
         return None
     days = [_stored_day(session, site, len(sites), local_date, now) for site in shown]
+    if not settings.ray_visible:  # stored values stay; nothing owner-facing carries RAY
+        for d in days:
+            d.ray = None
+    overall_ray = weighted_ray([(d.ray, d.production_wh) for d in days])
     local_dt = now.astimezone(ZoneInfo(shown[0].tz))
     # Spec section 1: a total for several sites with production; its ₪ only when every
     # site has income (a partial ₪ sum next to the full kWh sum looks wrong)
@@ -195,14 +199,14 @@ def build_owner_report(
         as_of = min(updates).astimezone(ZoneInfo(shown[0].tz))
         header += f" · נכון ל־{as_of:%H:%M}"
     card = CardData(
-        ray=weighted_ray([(d.ray, d.kwp) for d in days]),
+        ray=overall_ray,
         rows=[_card_row(d) for d in days],
         total=total,
         header=header,
         site_count=len(days),
         footnote="הכנסה משוערת לפני מע״מ" if any(d.income_ils is not None for d in days) else None,
     )
-    return card, he.daily_report(owner.display_name, days, local_dt, show_total)
+    return card, he.daily_report(owner.display_name, days, local_dt, show_total, overall_ray)
 
 
 class Reporter:

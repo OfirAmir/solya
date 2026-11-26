@@ -84,7 +84,8 @@ def _figures(d: SiteDay) -> str:
     return f"{kwh}, {phrase}" if phrase else kwh
 
 
-def daily_report(name: str, days: list[SiteDay], local_dt: datetime, show_total: bool) -> str:
+def daily_report(name: str, days: list[SiteDay], local_dt: datetime, show_total: bool,
+                 total_ray: float | None = None) -> str:
     lines = [f"{greeting(local_dt)} {name},"]
     any_fault = False
 
@@ -117,6 +118,8 @@ def daily_report(name: str, days: list[SiteDay], local_dt: datetime, show_total:
         total_wh = sum(d.production_wh for d in shown)
         incomes = [d.income_ils for d in shown if d.income_ils is not None]
         total = fmt_kwh(total_wh)
+        if total_ray is not None:
+            total = f"RAY {int(round(total_ray))}, {total}"
         if incomes and len(incomes) == len(shown):  # ₪ only when every site has income
             total += f", {fmt_ils(sum(incomes, Decimal('0')))} לפני מע״מ"
         lines.append(f"סה״כ: {total}")

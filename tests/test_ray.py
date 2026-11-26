@@ -23,7 +23,7 @@ def test_ray_bands(score, band):
 
 def test_weighted_ray():
     assert round(weighted_ray([(95, 90.72), (97, 26.55)]), 2) == 95.45
-    assert weighted_ray([(95, 90.72), (None, 26.55)]) is None
+    assert weighted_ray([(95, 90.72), (None, 26.55)]) == 95
     assert weighted_ray([(95, None)]) is None
     assert weighted_ray([]) is None
 

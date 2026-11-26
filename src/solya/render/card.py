@@ -22,6 +22,7 @@ MARGIN = 60
 FONT_PATH = Path(__file__).parent / "fonts" / "Heebo[wght].ttf"
 TOTAL_LABEL = "סה״כ"
 
+RAY_CAPTION = "מדד RAY"
 RAY_DIAMETER = 260
 RAY_CENTER = (540, 190)
 TOP_NO_RAY = 60
@@ -41,6 +42,7 @@ class CardRow:
     note: str | None
     income_label: str | None = None
     status: tuple[str, str] | None = None  # ("ok" | "fault", Hebrew text)
+    ray: float | None = None
 
 
 @dataclass(frozen=True)
@@ -87,6 +89,12 @@ def _draw_row(draw: ImageDraw.ImageDraw, y: int, row: CardRow, fonts, bold: bool
     if row.note is not None:
         _text(draw, (WIDTH - MARGIN, base + 8), row.note, note, INK, "ra")
         return
+    if row.ray is not None:
+        # small band-coloured score in the middle of the row, labelled "RAY"
+        cx = WIDTH // 2
+        draw.text((cx, base + 28), str(round(row.ray)), font=_font(56, 700),
+                  fill=RAY_COLORS[ray_band(row.ray)], anchor="mm")
+        draw.text((cx, base + 84), "RAY", font=_font(24, 400), fill=GREY, anchor="mm")
     if row.production_wh is not None:
         _text(draw, (WIDTH - MARGIN, base), fmt_kwh(row.production_wh), big, INK, "ra")
     if row.income_ils is not None:
@@ -119,7 +127,7 @@ def render_card(data: CardData) -> bytes:
         r = RAY_DIAMETER // 2
         draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=RAY_COLORS[ray_band(data.ray)])
         draw.text((cx, cy), str(round(data.ray)), font=_font(110, 700), fill="#FFFFFF", anchor="mm")
-        draw.text((cx, cy + r + 28), "RAY FACTOR", font=_font(30, 400), fill=GREY, anchor="mm")
+        _text(draw, (cx, cy + r + 28), RAY_CAPTION, _font(30, 400), GREY, "mm")
 
     y = top
     for row in data.rows:
@@ -142,9 +150,10 @@ def _sample(ray: float | None) -> CardData:
     return CardData(
         ray=ray,
         rows=[
-            CardRow("אורן סופר", 316990.0, Decimal("142.65"), None, "הכנסה", ("ok", "אין התראות פעילות")),
+            CardRow("אורן סופר", 316990.0, Decimal("142.65"), None, "הכנסה", ("ok", "אין התראות פעילות"),
+                    ray=ray),
             CardRow("IL 360", 85039.0, Decimal("38.03"), None, "הכנסה מהזרמה",
-                    ("fault", "התראה פתוחה: FAN_ALERT_1")),
+                    ("fault", "התראה פתוחה: FAN_ALERT_1"), ray=None if ray is None else ray - 3),
         ],
         total=(402029.0, Decimal("180.68")),
         header="רביעי, 25 בנובמבר · נכון ל־17:01",

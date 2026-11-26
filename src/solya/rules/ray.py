@@ -64,16 +64,18 @@ def ray_band(score: float) -> RayBand:
 
 
 def weighted_ray(items: list[tuple[float | None, float | None]]) -> float | None:
-    """kWp-weighted mean of (score, kwp) pairs; None if any score is None or no kWp."""
-    if not items:
-        return None
-    total_kwp = 0.0
+    """Mean of (score, weight) pairs weighted by the day's production Wh.
+
+    Items with a None score (or None weight) are skipped; None if nothing remains or the
+    total weight is not positive.
+    """
     acc = 0.0
-    for score, kwp in items:
-        if score is None or kwp is None:
-            return None
-        acc += score * kwp
-        total_kwp += kwp
-    if total_kwp <= 0:
+    total = 0.0
+    for score, weight in items:
+        if score is None or weight is None:
+            continue
+        acc += score * weight
+        total += weight
+    if total <= 0:
         return None
-    return acc / total_kwp
+    return acc / total

@@ -901,3 +901,57 @@ async def test_tariff_hint_weekly(h):
     assert he.TARIFF_HINT not in second.text.replace(RLM, "")
     with session_scope(h.db) as s:
         assert s.get(OutboxEntry, "tariff_hint:1:2026-W48") is not None
+
+
+D26 = date(2026, 11, 26)
+NOW26 = datetime(2026, 11, 26, 15, 5, tzinfo=timezone.utc)
+
+
+def _seed_ray_day(h, farm_ray=91.0, home_ray=92.0):
+    with session_scope(h.db) as s:
+        for sid, wh, ray in ((FARM, 310100.0, farm_ray), (HOME, 86600.0, home_ray)):
+            s.merge(DailyMetric(site_id=sid, local_date=D26, production_wh=wh, ray=ray,
+                                income_ils=Decimal("10.00"), comm_state="ok",
+                                as_of=NOW26, computed_at=NOW26))
+
+
+def _report26(h, visible, **kw):
+    _seed_ray_day(h, **kw)
+    h.reporter._settings.ray_visible = visible
+    with session_scope(h.db) as s:
+        return reporting.build_owner_report(s, 1, D26, NOW26, h.reporter._settings, NullRay())
+
+
+async def test_ray_hidden_when_not_visible(h):
+    card, text = _report26(h, False)
+    assert card.ray is None
+    assert all(r.ray is None for r in card.rows)
+    assert "RAY" not in text
+
+
+async def test_ray_visible_weighted_by_production(h):
+    card, text = _report26(h, True)
+    assert round(card.ray) == 91
+    assert [round(r.ray) for r in card.rows] == [91, 92]
+    assert text.replace(RLM, "").count("סה״כ: RAY 91, 396.7 קוט״ש") == 1
+
+
+async def test_ray_overall_skips_none_site(h):
+    card, _ = _report26(h, True, farm_ray=None, home_ray=92.0)
+    assert card.ray == 92.0
+    assert card.rows[0].ray is None
+
+
+async def test_ray_all_none_no_gauge(h):
+    card, text = _report26(h, True, farm_ray=None, home_ray=None)
+    assert card.ray is None
+    assert "RAY" not in text
+
+
+def test_weighted_ray_production_weights():
+    from solya.rules.ray import weighted_ray
+
+    assert weighted_ray([(None, 5.0), (80.0, 100.0)]) == 80.0
+    assert weighted_ray([(90.0, 0.0), (80.0, 0.0)]) is None
+    assert weighted_ray([(None, None)]) is None
+    assert weighted_ray([(90.0, 300.0), (60.0, 100.0)]) == 82.5

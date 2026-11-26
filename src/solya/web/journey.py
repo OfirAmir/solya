@@ -82,7 +82,7 @@ def _landing(request: Request, *, code: str = "", name: str = "", error: str | N
         request,
         "landing.html",
         {
-            "ray": bool(c.settings.ray_implementation),
+            "ray": bool(c.settings.ray_visible),
             "vat_note": VAT_NOTE,
             "csrf": c.sessions.csrf_token(pre),
             "code": code,

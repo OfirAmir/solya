@@ -92,3 +92,14 @@ def test_render_total_kwh_only():
     im = Image.open(BytesIO(render_card(CardData(ray=None, rows=rows,
                                                  total=(402029.0, None)))))
     assert im.format == "PNG" and im.width == 1080
+
+
+def test_caption_and_row_ray_render():
+    import solya.render.card as c
+
+    assert c.RAY_CAPTION == "מדד RAY"
+    row = CardRow("אורן סופר", 316990.0, Decimal("142.65"), None, ray=91.0)
+    plain = _open(_data(ray=95, rows=[_row()]))
+    with_ray = _open(_data(ray=95, rows=[row]))
+    assert plain.size == with_ray.size
+    assert list(plain.getdata()) != list(with_ray.getdata())
