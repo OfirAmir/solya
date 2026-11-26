@@ -1016,3 +1016,119 @@ async def test_ray_database_error_is_not_swallowed(h, load_fixture):
 
     with pytest.raises(OperationalError):
         await pull_both(h, load_fixture)
+
+
+# ------------------------------------------------------- weak production
+
+
+class FakeRay:
+    """Stores a ray_daily row with a chosen perf_ratio, like RayV1 would."""
+
+    def __init__(self, perf_ratio, source="history", cloud=10.0):
+        self.perf_ratio, self.source, self.cloud = perf_ratio, source, cloud
+
+    def compute(self, site, local_date, session, actual_wh=None):
+        from solya.models import RayDaily
+
+        row = session.get(RayDaily, (site.se_site_id, local_date)) or RayDaily(
+            site_id=site.se_site_id, local_date=local_date)
+        row.perf_ratio, row.expected_source, row.cloud_pct = self.perf_ratio, self.source, self.cloud
+        session.add(row)
+        session.flush()
+        return 50.0
+
+
+def seed_weak_history(db, site_id, *perf_ratios):
+    from solya.models import RayDaily
+
+    with session_scope(db) as s:
+        for back, pr in enumerate(perf_ratios, start=1):
+            d = DAY - timedelta(days=back)
+            s.add(DailyMetric(site_id=site_id, local_date=d, production_wh=40000.0, comm_state="ok",
+                              as_of=NOW, computed_at=NOW))
+            s.add(RayDaily(site_id=site_id, local_date=d, perf_ratio=pr, expected_source="history",
+                           cloud_pct=10.0))
+
+
+def enable_weak(h, perf_ratio, **kw):
+    h.reporter._settings = h.reporter._settings.model_copy(
+        update={"weak_alerts_enabled": True, "ray_implementation": "solya.rules.ray_v1:RayV1"})
+    h.reporter._ray = FakeRay(perf_ratio, **kw)
+
+
+WEAK_ALERT = rtl_text(
+    "ערב טוב אורן,\n"
+    "קיים חשד סביר לירידה בייצור (בית): ב־3 הימים האחרונים המערכת ייצרה כ־61% מהצפוי "
+    "ביחס למזג האוויר. סיבות אפשריות: לכלוך על הפאנלים, הצללה או תקלה ברכיב. "
+    "אני ממשיכה לעקוב ואעדכן אתכם. איך תרצו להתקדם?"
+)
+
+
+async def test_weak_production_opens_and_recovers(h, load_fixture):
+    seed_weak_history(h.db, HOME, 62, 63)
+    enable_weak(h, 58)
+    with respx.mock:
+        mock_site(load_fixture, HOME)
+        await h.reporter.evening_pull(HOME)
+    (alert,) = h.sent("fault")
+    assert alert.text == WEAK_ALERT
+    assert alert.dedupe_key == f"fault:{HOME}:weak:{HOME}"
+    with session_scope(h.db) as s:
+        (rec,) = s.scalars(select(FaultRecord)).all()
+        assert (rec.source, rec.code, rec.notified_at is not None) == ("weak", "WEAK_PRODUCTION", True)
+
+    # A midday check knows nothing about weak production: the fault stays open.
+    h.clock.set(datetime(2026, 11, 25, 10, 30, tzinfo=timezone.utc))
+    with respx.mock:
+        mock_site(load_fixture, HOME, site=site_body(load_fixture, HOME, "2026-11-25T12:25:00+02:00"))
+        await h.reporter.midday_check(HOME)
+
+    # A cloudy evening is skipped: no close, no second alert.
+    h.clock.set(NOW + timedelta(days=1))
+    h.reporter._ray = FakeRay(99, cloud=90.0)
+    with respx.mock:
+        mock_site(load_fixture, HOME, site=site_body(load_fixture, HOME, "2026-11-25T16:40:00+02:00"))
+        await h.reporter.evening_pull(HOME)
+    with session_scope(h.db) as s:
+        (rec,) = s.scalars(select(FaultRecord)).all()
+        assert rec.closed_at is None
+    assert len(h.sent("fault")) == 1
+
+    # A clear evening at WEAK_RECOVER closes it with the design's message.
+    h.clock.set(NOW + timedelta(days=2))
+    h.reporter._ray = FakeRay(88)
+    with respx.mock:
+        mock_site(load_fixture, HOME, site=site_body(load_fixture, HOME, "2026-11-26T16:40:00+02:00"))
+        await h.reporter.evening_pull(HOME)
+    (closed,) = [m for m in h.channel.sent if m.dedupe_key.startswith("closed:")]
+    assert closed.text == rtl_text("ערב טוב אורן,\nהייצור (בית) חזר לרמה הצפויה. אמשיך לעקוב.")
+    assert closed.dedupe_key == f"closed:{HOME}:weak:{HOME}"
+
+
+async def test_weak_production_needs_three_counted_days(h, load_fixture):
+    seed_weak_history(h.db, HOME, 62)  # only two low days with tonight
+    enable_weak(h, 58)
+    with respx.mock:
+        mock_site(load_fixture, HOME)
+        await h.reporter.evening_pull(HOME)
+    assert h.sent("fault") == []
+
+
+async def test_weak_production_table_expectation_never_alerts(h, load_fixture):
+    seed_weak_history(h.db, HOME, 62, 63)
+    enable_weak(h, 58, source="table")
+    with respx.mock:
+        mock_site(load_fixture, HOME)
+        await h.reporter.evening_pull(HOME)
+    assert h.sent("fault") == []
+
+
+async def test_weak_production_off_by_default(h, load_fixture):
+    seed_weak_history(h.db, HOME, 62, 63)
+    h.reporter._ray = FakeRay(58)
+    with respx.mock:
+        mock_site(load_fixture, HOME)
+        await h.reporter.evening_pull(HOME)
+    assert h.sent("fault") == []
+    with session_scope(h.db) as s:
+        assert s.scalars(select(FaultRecord)).all() == []

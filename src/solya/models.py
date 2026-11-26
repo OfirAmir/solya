@@ -167,6 +167,8 @@ class FaultRecord(Base):
     acked_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     closed_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     closed_notified_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    # Source-specific alert figures as JSON (weak production: {"days": n, "pct": p}).
+    detail: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class OutboxEntry(Base):

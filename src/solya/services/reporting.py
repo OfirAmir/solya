@@ -36,6 +36,7 @@ from solya.rules.faults import (
     sync_faults,
 )
 from solya.rules.ray import RayCalculator, weighted_ray
+from solya.rules.weak import WEAK_SOURCE, sync_weak
 from solya.scheduler import is_daylight
 from solya.services.backfill import backfill_history, backfill_month
 from solya.services.onboarding import create_connect_request
@@ -76,7 +77,7 @@ def owner_chat(owner: Owner) -> str | None:
 
 
 def _view(rec: FaultRecord) -> FaultView:
-    return FaultView(rec.code, rec.serial, rec.first_seen, rec.source)
+    return FaultView(rec.code, rec.serial, rec.first_seen, rec.source, rec.detail)
 
 
 def _owner_sites(session: Session, owner_id: int, monitored_only: bool = False) -> list[Site]:
@@ -384,6 +385,10 @@ class Reporter:
                 as_of = (bundle.site.last_update_time if bundle.site is not None else None) or bundle.pulled_at
                 persist_site_day(s, day, local_date, lifetime_wh, as_of, computed_at=now)
                 no_data = monitored and day.state == "no_data"
+                # Weak production: once per evening, right after tonight's RAY. Only a
+                # fresh, complete day is evaluated; a silent pull never closes it.
+                if monitored and day.state == "ok":
+                    events += sync_weak(s, site_id, local_date, now, self._settings, notify)
 
             if not monitored:
                 return [], no_data
@@ -411,6 +416,8 @@ class Reporter:
                     rec = ev.record
                     if rec.source == "alert":  # SolarEdge itself closed the alert
                         text = he.fault_closed(name, _view(rec), local_now)
+                    elif rec.source == WEAK_SOURCE:  # a counted day back at WEAK_RECOVER
+                        text = he.weak_recovered(name, fault_label, local_now)
                     elif rec.serial:  # R24: our own detection cleared; never "SolarEdge closed"
                         text = he.inverter_recovered(name, rec.serial, local_now)
                     else:  # ZERO_PRODUCTION: no inverter to name, close silently

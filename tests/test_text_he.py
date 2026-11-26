@@ -364,3 +364,43 @@ def test_owner_is_addressed_in_gender_neutral_plural():
     days = [ok_day("משק", 316990, "142.65")]
     assert he.daily_report("אורן", days, AT_1710, False).endswith(
         "לכל שאלה אני כאן. שיהיה ערב טוב.")
+
+
+def weak(detail='{"days": 3, "pct": 62}'):
+    return FaultView("WEAK_PRODUCTION", None, AT_1710, "weak", detail)
+
+
+def test_weak_production_alert_copy():
+    out = he.fault_alert("אורן", None, weak(), AT_1710, AT_1710)
+    assert out == (
+        "ערב טוב אורן,\n"
+        "קיים חשד סביר לירידה בייצור: ב־3 הימים האחרונים המערכת ייצרה כ־62% מהצפוי "
+        "ביחס למזג האוויר. סיבות אפשריות: לכלוך על הפאנלים, הצללה או תקלה ברכיב. "
+        "אני ממשיכה לעקוב ואעדכן אתכם. איך תרצו להתקדם?"
+    )
+    labelled = he.fault_alert("אורן", "משק", weak(), AT_1710, AT_1710)
+    assert "קיים חשד סביר לירידה בייצור (משק): ב־3" in labelled
+
+
+def test_weak_production_closed_copy():
+    assert he.weak_recovered("אורן", None, AT_1710) == (
+        "ערב טוב אורן,\nהייצור חזר לרמה הצפויה. אמשיך לעקוב."
+    )
+    assert he.weak_recovered("אורן", "בית", AT_1710) == (
+        "ערב טוב אורן,\nהייצור (בית) חזר לרמה הצפויה. אמשיך לעקוב."
+    )
+
+
+def test_weak_copy_plural_and_no_direction_marks():
+    texts = [he.fault_alert("אורן", "משק", weak(), AT_1710, AT_1710),
+             he.weak_recovered("אורן", "משק", AT_1710)]
+    for text in texts:
+        assert RLM not in text and "‎" not in text
+        for form in SINGULAR_FORMS + ("אותך", "שלך", "תרצי", "אעדכן אותך"):
+            assert form not in text
+    assert "אעדכן אתכם" in texts[0] and "תרצו" in texts[0]
+
+
+def test_weak_alert_without_figures_still_reads():
+    out = he.fault_alert("אורן", None, weak(None), AT_1710, AT_1710)
+    assert "קיים חשד סביר לירידה בייצור: בימים האחרונים המערכת ייצרה פחות מהצפוי" in out

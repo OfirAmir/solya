@@ -26,6 +26,12 @@ class DetectedFault:
     code: str
     serial: str | None
     first_seen: datetime
+    # Source-specific figures for the alert text (JSON), e.g. weak production's days/pct.
+    detail: str | None = None
+
+
+# Evaluated by its own evening check (rules/weak.py), never by a pull's detection.
+SEPARATE_SOURCES = frozenset({"weak"})
 
 
 @dataclass(frozen=True)
@@ -121,9 +127,14 @@ def sync_faults(
     detected: list[DetectedFault],
     now: datetime,
     data_complete: bool,
+    source: str | None = None,
 ) -> list[FaultEvent]:
     """Reconcile detected faults with stored records. A closed fault seen again opens a
-    new episode under a new key (R13); a closed key itself is never reopened."""
+    new episode under a new key (R13); a closed key itself is never reopened.
+
+    ``source`` None reconciles a pull's detection: it never closes a record of a
+    separately evaluated source (weak production). A ``source`` name closes only that
+    source's records."""
     rows = session.scalars(select(FaultRecord).where(FaultRecord.site_id == site_id)).all()
     keys = {r.key for r in rows}
     open_bases = {_base(r.key) for r in rows if r.closed_at is None}
@@ -148,15 +159,19 @@ def sync_faults(
             code=d.code,
             serial=d.serial,
             first_seen=d.first_seen,
+            detail=d.detail,
         )
         session.add(rec)
         keys.add(key)
         open_bases.add(base)
         events.append(NewFault(rec))
 
+    def managed(rec: FaultRecord) -> bool:
+        return rec.source == source if source is not None else rec.source not in SEPARATE_SOURCES
+
     if data_complete:
         for rec in rows:
-            if rec.closed_at is None and _base(rec.key) not in detected_bases:
+            if rec.closed_at is None and managed(rec) and _base(rec.key) not in detected_bases:
                 rec.closed_at = now
                 if rec.notified_at is not None:
                     events.append(ClosedFault(rec))
@@ -171,7 +186,7 @@ def open_fault_views(session: Session, site_id: int) -> list[FaultView]:
         .where(FaultRecord.site_id == site_id, FaultRecord.closed_at.is_(None))
         .order_by(FaultRecord.first_seen, FaultRecord.id)
     ).all()
-    return [FaultView(r.code, r.serial, r.first_seen, r.source) for r in rows]
+    return [FaultView(r.code, r.serial, r.first_seen, r.source, r.detail) for r in rows]
 
 
 def ack_owner_faults(session: Session, owner_id: int, now: datetime) -> int:

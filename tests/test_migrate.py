@@ -117,6 +117,26 @@ def test_migrate_old_schema():
         assert [f[2] for f in fks] == ["owners"]
 
 
+def test_migrate_adds_fault_detail():
+    """The weak production alert stores its figures in faults.detail."""
+    engine = make_engine("sqlite://")
+    with engine.begin() as conn:
+        conn.exec_driver_sql(
+            "CREATE TABLE faults (id INTEGER PRIMARY KEY, site_id BIGINT, key VARCHAR,"
+            " source VARCHAR, code VARCHAR, serial VARCHAR, first_seen DATETIME,"
+            " notified_at DATETIME, reminded_at DATETIME, acked_at DATETIME,"
+            " closed_at DATETIME, closed_notified_at DATETIME)"
+        )
+        conn.exec_driver_sql(
+            "INSERT INTO faults (site_id, key, source, code, first_seen)"
+            " VALUES (1, 'alert:7', 'alert', 'E12', '2026-11-24 10:00:00')"
+        )
+    assert "ALTER TABLE faults ADD COLUMN detail VARCHAR" in migrate.apply(engine)
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT key, detail FROM faults")).one() == ("alert:7", None)
+    assert migrate.apply(engine) == []
+
+
 def test_migrate_idempotent():
     engine = _old_db()
     from solya import models  # noqa: F401

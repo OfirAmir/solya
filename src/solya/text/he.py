@@ -5,6 +5,7 @@ gender-neutral plural ("שלחו", "פתחו", "תרצו"). "לך"/"שלך" read
 """
 from __future__ import annotations
 
+import json
 from datetime import date, datetime
 from decimal import Decimal
 
@@ -145,7 +146,9 @@ def fault_alert(
 ) -> str:
     paren = f" ({label})" if label else ""
     tail = f"{_PROFESSIONAL} {_ADVICE} {_FOLLOW_UP}"
-    if f.code == "ZERO_PRODUCTION":
+    if f.code == "WEAK_PRODUCTION":
+        body = _weak_body(paren, f.detail)
+    elif f.code == "ZERO_PRODUCTION":
         body = f"היום המערכת{paren} לא ייצרה חשמל למרות שהנתונים מתעדכנים. {tail}"
     elif f.code == "INVERTER_NOT_REPORTING":
         body = (
@@ -159,6 +162,27 @@ def fault_alert(
             f"{f.code}{_in_serial(f.serial)}. {cause}{tail}"
         )
     return rtl_text(f"{greeting(local_dt)} {name},\n{body}")
+
+
+def _weak_body(paren: str, detail: str | None) -> str:
+    """Smarter-alerts design copy; ``detail`` is the record's {"days", "pct"} JSON."""
+    try:
+        figures = json.loads(detail) if detail else {}
+        days, pct = int(figures["days"]), int(figures["pct"])
+        seen = f"ב־{days} הימים האחרונים המערכת ייצרה כ־{pct}% מהצפוי ביחס למזג האוויר"
+    except (ValueError, TypeError, KeyError):  # defensive: a record without its figures
+        seen = "בימים האחרונים המערכת ייצרה פחות מהצפוי ביחס למזג האוויר"
+    return (
+        f"קיים חשד סביר לירידה בייצור{paren}: {seen}. "
+        "סיבות אפשריות: לכלוך על הפאנלים, הצללה או תקלה ברכיב. "
+        "אני ממשיכה לעקוב ואעדכן אתכם. איך תרצו להתקדם?"
+    )
+
+
+def weak_recovered(name: str, label: str | None, local_dt: datetime) -> str:
+    """Closure of a WEAK_PRODUCTION fault (a counted day back at WEAK_RECOVER)."""
+    paren = f" ({label})" if label else ""
+    return rtl_text(f"{greeting(local_dt)} {name},\nהייצור{paren} חזר לרמה הצפויה. אמשיך לעקוב.")
 
 
 def fault_reminder(name: str, f: FaultView, local_dt: datetime) -> str:

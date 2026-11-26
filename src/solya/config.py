@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     fault_reminder_hours: int = 3
     # An inverter fault mode alerts only after this many hourly samples in the day.
     fault_min_samples: int = Field(2, ge=1)
+    # Weak production alert (smarter-alerts design); needs RAY_IMPLEMENTATION.
+    weak_alerts_enabled: bool = False
+    weak_threshold: float = 70
+    weak_recover: float = 85
+    weak_days: int = Field(3, ge=1)
+    weak_max_cloud_pct: float = 70
     evening_pull_offset_minutes: int = 25
     report_offset_minutes: int = 30
     default_check_times: list[str] = ["12:30"]

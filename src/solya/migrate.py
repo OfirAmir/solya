@@ -1,7 +1,7 @@
 """Idempotent, additive SQLite migration for databases created before web onboarding.
 
 ``Base.metadata.create_all`` creates missing tables but never alters existing ones, so
-columns added to ``owners``/``sites`` later are applied here.
+columns added to ``owners``/``sites``/``faults`` later are applied here.
 """
 
 from sqlalchemy import Connection, Engine, MetaData, text
@@ -17,6 +17,9 @@ _OWNER_COLUMNS = {
 _SITE_COLUMNS = {
     "monitored": "BOOLEAN NOT NULL DEFAULT 1",
     "call_plan": "VARCHAR NOT NULL DEFAULT 'standard'",
+}
+_FAULT_COLUMNS = {
+    "detail": "VARCHAR",
 }
 _LINK_INDEX = "ix_owners_link_token"
 _TMP_OWNERS = "owners__new"
@@ -67,7 +70,9 @@ def apply(engine: Engine) -> list[str]:
             conn.exec_driver_sql(stmt)
             ran.append(stmt)
 
-        for table, wanted in (("owners", _OWNER_COLUMNS), ("sites", _SITE_COLUMNS)):
+        for table, wanted in (
+            ("owners", _OWNER_COLUMNS), ("sites", _SITE_COLUMNS), ("faults", _FAULT_COLUMNS),
+        ):
             have = _columns(conn, table)
             if not have:  # table absent: create_all owns it
                 continue
