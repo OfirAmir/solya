@@ -41,7 +41,7 @@ REGRESSION = (
     "משק: אין התראות פעילות. ‏317.0 קוט״ש, הכנסה ‏142.65 ₪\n"
     "בית: אין התראות פעילות. ‏85.0 קוט״ש, הכנסה מהזרמה ‏38.03 ₪\n"
     "סה״כ: ‏402.0 קוט״ש, ‏180.68 ₪ לפני מע״מ\n"
-    "לכל שאלה אני כאן. המשך ערב טוב."
+    "לכל שאלה אני כאן. שיהיה ערב טוב."
 )
 
 DEFAULTS = {
@@ -416,7 +416,7 @@ async def test_report_with_reauth_site(h, load_fixture, cards):
         "ערב טוב אורן,\n"
         "בית: החיבור ל־SolarEdge פג, שלחתי קישור לחיבור מחדש.\n"
         "משק: אין התראות פעילות. ‏317.0 קוט״ש, הכנסה ‏142.65 ₪\n"
-        "לכל שאלה אני כאן. המשך ערב טוב."
+        "לכל שאלה אני כאן. שיהיה ערב טוב."
     )
     assert [(r.name, r.note) for r in cards[0].rows] == [
         ("אורן סופר", None), ("IL 360", "נדרש חיבור מחדש")]
@@ -529,7 +529,7 @@ async def test_on_site_connected_welcomes(h):
     await h.reporter.on_site_connected(site, is_first=True)
 
     texts = [m.text for m in h.channel.sent]
-    connected = rtl_text("המערכת משק חוברה בהצלחה. יש לך עוד מערכת? שלח /connect.")
+    connected = rtl_text("המערכת משק חוברה בהצלחה. יש לך עוד מערכת? שלחו /connect.")
     assert texts == [connected, rtl_text(WELCOME_1)]
     assert f"{RLM}24/7" in texts[1]
     assert [seconds for seconds, _ in h.delayed] == [60]
@@ -545,7 +545,7 @@ async def test_on_site_connected_welcomes(h):
 async def test_on_site_connected_already_message(h):
     await h.reporter.on_site_connected(HOME, is_first=False, already=True)
     (msg,) = h.channel.sent
-    assert msg.text == rtl_text("המערכת בית כבר מחוברת. בחלון של SolarEdge בחר מערכת אחרת.")
+    assert msg.text == rtl_text("המערכת בית כבר מחוברת. בחלון של SolarEdge בחרו מערכת אחרת.")
     assert "\u200e" not in msg.text
     assert not h.delayed
 
@@ -553,7 +553,7 @@ async def test_on_site_connected_already_message(h):
 async def test_on_site_connected_command_has_no_direction_marks(h):
     await h.reporter.on_site_connected(HOME, is_first=False)
     (msg,) = h.channel.sent
-    assert msg.text.endswith("שלח /connect.")
+    assert msg.text.endswith("שלחו /connect.")
     assert "\u200f/connect" not in msg.text and "\u200e" not in msg.text
 
 

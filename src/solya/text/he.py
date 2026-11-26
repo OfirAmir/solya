@@ -1,4 +1,8 @@
-"""Hebrew message templates (Sol speaks feminine Hebrew). Plain functions, no Jinja."""
+"""Hebrew message templates. Plain functions, no Jinja.
+
+Sol speaks of herself in the feminine ("אני עוקבת"); she addresses the owner in
+gender-neutral plural ("שלחו", "פתחו", "תרצו"). "לך"/"שלך" read the same for both.
+"""
 from __future__ import annotations
 
 from datetime import date, datetime
@@ -9,29 +13,29 @@ from solya.rules.ray import display_ray
 from solya.text.rtl import rtl_text
 
 WELCOME_1 = (
-    "ברוך הבא לסוליה ☀️ אני סול, הנציגה הדיגיטלית שלך. אני עוזרת מבוססת בינה מלאכותית, "
+    "ברוכים הבאים לסוליה ☀️ אני סול, הנציגה הדיגיטלית שלך. אני עוזרת מבוססת בינה מלאכותית, "
     "שומרת על המערכת הסולארית שלך וזמינה בשבילך 24/7."
 )
 WELCOME_2 = "כל ערב, אחרי השקיעה, אשלח לך סיכום קצר של הייצור וההכנסה. אם אזהה תקלה, אעדכן אותך."
 NOT_INVITED = "הפיילוט של סוליה פתוח כרגע בהזמנה בלבד."
-INVITE_OK = "הצטרפת לפיילוט של סוליה. כדי לחבר מערכת שלח /connect"
+INVITE_OK = "הצטרפת לפיילוט של סוליה. כדי לחבר מערכת שלחו /connect"
 LINKED_OK = "החשבון חובר לטלגרם."
 HELP = (
     "אני יכולה לענות על: היום, אתמול, החודש, התראות.\n"
-    "לחיבור מערכת נוספת שלח /connect\n"
-    "לשינוי שם, תעריף או מעקב שלח /settings"
+    "לחיבור מערכת נוספת שלחו /connect\n"
+    "לשינוי שם, תעריף או מעקב שלחו /settings"
 )
 
 
 def settings_link(url: str) -> str:
-    return f"כדי לשנות שם, תעריף או מעקב, פתח את הקישור (בתוקף ל־15 דקות):\n{url}"
+    return f"כדי לשנות שם, תעריף או מעקב, פתחו את הקישור (בתוקף ל־15 דקות):\n{url}"
 
 NO_DATA_YET = "המידע עדיין לא הגיע אלי, אני על זה."
 
 CAUSES = {"FAN_ALERT_1": "ככל הנראה מדובר בתקלה במאוורר הקירור של הממיר. "}
 
 _ADVICE = "אני ממליצה לפתוח קריאת שירות מול SolarEdge או להזמין טכנאי מוסמך."
-_FOLLOW_UP = "אני ממשיכה לעקוב ואעדכן אותך. איך תרצה להתקדם?"
+_FOLLOW_UP = "אני ממשיכה לעקוב ואעדכן אותך. איך תרצו להתקדם?"
 _PROFESSIONAL = "נדרשת בדיקה של איש מקצוע מוסמך לאבחון ולטיפול, ולא טיפול עצמי."
 
 
@@ -62,7 +66,7 @@ def _in_serial(serial: str | None) -> str:
     return f" בממיר {serial}" if serial else ""
 
 
-TARIFF_HINT = "כדי לראות הכנסה, שלח /settings והזן תעריף."
+TARIFF_HINT = "כדי לראות הכנסה, שלחו /settings והזינו תעריף."
 
 _WEEKDAYS = ["שני", "שלישי", "רביעי", "חמישי", "שישי", "שבת", "ראשון"]  # Monday first
 _MONTHS = [
@@ -128,7 +132,7 @@ def daily_report(name: str, days: list[SiteDay], local_dt: datetime, show_total:
             total += f", {fmt_ils(sum(incomes, Decimal('0')))} לפני מע״מ"
         lines.append(f"סה״כ: {total}")
 
-    lines.append(_FOLLOW_UP if any_fault else "לכל שאלה אני כאן. המשך ערב טוב.")
+    lines.append(_FOLLOW_UP if any_fault else "לכל שאלה אני כאן. שיהיה ערב טוב.")
     return rtl_text("\n".join(lines))
 
 
@@ -197,7 +201,7 @@ def comm_restored(name: str, label: str, local_dt: datetime) -> str:
 
 def connect_link(url: str) -> str:
     return rtl_text(
-        "כדי לחבר מערכת SolarEdge, פתח את הקישור ואשר גישה עם חשבון הבעלים של המערכת:\n"
+        "כדי לחבר מערכת SolarEdge, פתחו את הקישור ואשרו גישה עם חשבון הבעלים של המערכת:\n"
         f"{url}\nהקישור בתוקף ל־15 דקות."
     )
 
@@ -210,17 +214,17 @@ def sites_monitored(n: int) -> str:
 
 
 def site_connected(name: str) -> str:
-    return rtl_text(f"המערכת {name} חוברה בהצלחה. יש לך עוד מערכת? שלח /connect.")
+    return rtl_text(f"המערכת {name} חוברה בהצלחה. יש לך עוד מערכת? שלחו /connect.")
 
 
 def site_already_connected(name: str) -> str:
-    return rtl_text(f"המערכת {name} כבר מחוברת. בחלון של SolarEdge בחר מערכת אחרת.")
+    return rtl_text(f"המערכת {name} כבר מחוברת. בחלון של SolarEdge בחרו מערכת אחרת.")
 
 
 def reauth_link(name: str, label: str, url: str, local_dt: datetime) -> str:
     return rtl_text(
         f"{greeting(local_dt)} {name},\n"
-        f"החיבור ל־SolarEdge עבור {label} פג. כדי שאמשיך לעקוב, פתח את הקישור ואשר מחדש:\n{url}"
+        f"החיבור ל־SolarEdge עבור {label} פג. כדי שאמשיך לעקוב, פתחו את הקישור ואשרו מחדש:\n{url}"
     )
 
 AI_BUDGET_USED = "התקציב החודשי לתשובות פתוחות נוצל. אני עדיין שולחת את הסיכום וההתראות."
