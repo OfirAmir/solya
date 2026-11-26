@@ -202,10 +202,52 @@ def test_settings_save_and_admin_notice(tc, container, channel):
     admin = [m for m in channel.sent if m.recipient == "999"]
     assert len(admin) == 1
     text = admin[0].text.replace("\u200f", "").replace("\u200e", "")  # rtl_text marks
-    assert f"בעלים {owner_id} שינה מעקב: משק. מחיר חודשי חדש: 49.97 ₪ לחודש." in text
+    assert (f"בעלים {owner_id} שינה מעקב: משק: הפסיק מעקב. "
+            "מחיר חודשי חדש: 49.97 ₪ לחודש.") in text
     # a save that changes no monitoring sends nothing
     r = tc.post("/settings", data={"csrf": csrf, "site": ["111111"], "tariff_111111": "0.5"})
     assert r.status_code == 200 and SAVED in r.text
+    assert len([m for m in channel.sent if m.recipient == "999"]) == 1
+
+
+def test_settings_monitoring_change_replans_and_names_direction(tc, container, channel,
+                                                               monkeypatch):
+    """Final fixes 2 and 6: ticking a system re-plans today's jobs for the owner, and
+    the admin notice says which way each site's monitoring changed."""
+    owner_id = _owner(container)
+    _add_site(container, owner_id, 111111, name="בית", kw=26.55)
+    _add_site(container, owner_id, 111112, name="משק", kw=65.52, monitored=False)
+    planned = []
+    monkeypatch.setattr(container.scheduler, "plan_owner", planned.append)
+    _sign_in(tc, container, owner_id)
+    planned.clear()
+    csrf = _csrf(tc.get("/settings").text)
+    r = tc.post("/settings", data={"csrf": csrf, "site": ["111111", "111112"]})
+    assert r.status_code == 200 and SAVED in r.text
+    assert planned == [owner_id]
+    [notice] = [m for m in channel.sent if m.recipient == "999"]
+    text = notice.text.replace("\u200f", "").replace("\u200e", "")
+    assert f"בעלים {owner_id} שינה מעקב: משק: התחיל מעקב. מחיר חודשי חדש: 115.46 ₪" in text
+    # a save that changes no monitoring does not re-plan
+    r = tc.post("/settings", data={"csrf": csrf, "site": ["111111", "111112"]})
+    assert r.status_code == 200 and planned == [owner_id]
+
+
+def test_settings_replan_failure_still_saves(tc, container, channel, monkeypatch, caplog):
+    owner_id = _owner(container)
+    _add_site(container, owner_id, 111111, name="בית")
+    _add_site(container, owner_id, 111112, name="משק", monitored=False)
+
+    def boom(_owner_id):
+        raise RuntimeError("secret detail")
+
+    monkeypatch.setattr(container.scheduler, "plan_owner", boom)
+    _sign_in(tc, container, owner_id)
+    r = tc.post("/settings", data={"csrf": _csrf(tc.get("/settings").text),
+                                   "site": ["111111", "111112"]})
+    assert r.status_code == 200 and SAVED in r.text
+    assert _site(container, 111112).monitored is True
+    assert "RuntimeError" in caplog.text and "secret detail" not in caplog.text
     assert len([m for m in channel.sent if m.recipient == "999"]) == 1
 
 

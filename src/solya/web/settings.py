@@ -6,6 +6,7 @@ and starts a 24-hour session. A used, expired or unknown token gets the "expired
 with status 410, and never a session."""
 from __future__ import annotations
 
+import logging
 import secrets
 
 from fastapi import APIRouter, Form, Request
@@ -25,6 +26,7 @@ from solya.web.security import (
 )
 
 router = APIRouter()
+log = logging.getLogger(__name__)
 
 LINK_EXPIRED = "הקישור פג. שלחו /settings לסול לקישור חדש."
 SAVED = "נשמר."
@@ -120,6 +122,7 @@ async def settings_save(request: Request):
         return _message(request, FORM_EXPIRED, 403)
     c = _container(request)
     notice = None
+    changed: list[int] = []
     with session_scope(c.session_factory) as s:
         # only this owner's sites are read: ids of others in the form are ignored
         sites = _owner_sites(s, owner_id)
@@ -129,7 +132,11 @@ async def settings_save(request: Request):
             changed = site_settings.apply_edits(s, owner_id, edits, site_today(c))
             if changed:
                 by_id = {site.se_site_id: site for site in sites}
-                names = ", ".join(site_settings.display_name(by_id[sid]) for sid in changed)
+                names = ", ".join(
+                    f"{site_settings.display_name(by_id[sid])}: "
+                    f"{'התחיל מעקב' if by_id[sid].monitored else 'הפסיק מעקב'}"
+                    for sid in changed
+                )
                 agorot, estimate = price_total(
                     [price_site(site) for site in sites if site.monitored]
                 )
@@ -141,6 +148,12 @@ async def settings_save(request: Request):
         return _settings_page(request, owner_id, csrf, status=400, form=form, errors=errors)
     if not picked:
         return _settings_page(request, owner_id, csrf, error=PICK_ONE, status=400, form=form)
+    if changed:
+        try:  # today's pull and report for a newly ticked system
+            c.scheduler.plan_owner(owner_id)
+        except Exception as e:
+            log.warning("could not re-plan today's jobs for owner %s: %s",
+                        owner_id, type(e).__name__)
     if notice is not None:
         stamp = c.clock.now().isoformat()
         await c.reporter.notify_admins(notice, f"admin_monitoring:{owner_id}:{stamp}")
